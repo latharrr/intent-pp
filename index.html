@@ -213,16 +213,6 @@
   .cta-go{ flex-shrink:0; width:36px; height:36px; border-radius:50%; background:rgba(255,255,255,.16); color:var(--white); display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:800; text-decoration:none; }
   .final-app-link{ display:flex; align-items:center; justify-content:center; gap:8px; background:var(--cream); border:2px solid var(--line); border-radius:999px; padding:11px 16px; font-weight:700; font-size:12.5px; color:var(--ink-soft); text-decoration:none; width:fit-content; margin:6px auto 0; }
 
-  /* ---------- referral card ---------- */
-  .ref-card{ border-radius:20px; padding:14px 15px; margin-bottom:10px; border:2.5px dashed var(--ink); background:var(--cream); }
-  .ref-card-title{ font-weight:800; font-size:13.5px; margin-bottom:8px; }
-  .ref-link-row{ display:flex; align-items:center; gap:8px; }
-  .ref-link-box{ flex:1; min-width:0; background:var(--white); border:2px solid var(--line); border-radius:12px; padding:9px 12px; font-size:12px; font-weight:700; color:var(--ink-soft); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .ref-copy-btn{ flex-shrink:0; background:var(--ink); color:var(--white); border:none; border-radius:12px; padding:9px 13px; font-weight:800; font-size:12px; cursor:pointer; }
-  .ref-copy-btn:active{ opacity:.8; }
-  .toast{ position:absolute; left:50%; bottom:14px; transform:translateX(-50%) translateY(10px); background:var(--ink); color:var(--white); font-weight:700; font-size:12.5px; padding:9px 16px; border-radius:999px; opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; z-index:20; }
-  .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
-
   .confetti{ position:relative; height:0; }
   .confetti span{ position:absolute; top:-10px; width:8px; height:8px; opacity:0; animation:fall 1.6s ease-in forwards; }
   @keyframes fall{ 0%{ opacity:1; transform:translateY(0) rotate(0deg);} 100%{ opacity:0; transform:translateY(140px) rotate(280deg);} }
@@ -249,7 +239,6 @@
   </div>
   <div class="content" id="content"></div>
   <div class="actions" id="actions"></div>
-  <div class="toast" id="toast"></div>
 </div>
 
 <script>
@@ -567,14 +556,6 @@ function referralUrl(){
   return window.location.origin + '/' + ensureReferralCode();
 }
 
-function showToast(msg){
-  const t = document.getElementById('toast');
-  if(!t) return;
-  t.textContent = msg;
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 1600);
-}
-
 /* ---- resolve redirect shortlinks before anything renders ---- */
 let REDIRECTING = false;
 (function resolveRedirectSlug(){
@@ -878,7 +859,6 @@ const ICON_CHAT = `<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><
 const ICON_SHARE = `<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><path d="M48 16 a8 8 0 1 1 0 -16 a8 8 0 0 1 0 16 M12 38 a8 8 0 1 1 0 -16 a8 8 0 0 1 0 16 M48 52 a8 8 0 1 1 0 -16 a8 8 0 0 1 0 16" fill="none" stroke="#6C4CF1" stroke-width="2.5" stroke-linecap="round"/><line x1="44" y1="14" x2="16" y2="32" stroke="#6C4CF1" stroke-width="2.5" stroke-linecap="round"/><line x1="44" y1="46" x2="16" y2="32" stroke="#6C4CF1" stroke-width="2.5" stroke-linecap="round"/></svg>`;
 
 const ICON_DOWNLOAD = `<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><rect x="12" y="12" width="36" height="32" rx="4" fill="none" stroke="#FF4B18" stroke-width="2.5"/><path d="M30 26 L30 42" stroke="#FF4B18" stroke-width="2.5" stroke-linecap="round"/><path d="M24 36 L30 42 L36 36" stroke="#FF4B18" stroke-width="2.5" stroke-linecap="round" fill="none"/><circle cx="48" cy="16" r="3" fill="#FF4B18"/></svg>`;
-const ICON_CART = `<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><path d="M10 14 h6 l6 28 h24 l5 -20 H24" fill="none" stroke="#15130F" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="26" cy="48" r="4" fill="#FF4B18"/><circle cx="42" cy="48" r="4" fill="#FF4B18"/></svg>`;
 
 /* final page — an unlocked reward burst */
 const UNLOCK_SVG = `
@@ -1217,14 +1197,6 @@ function screenHTML(id){
           </div>
           <a class="cta-go" href="${WHATSAPP_GROUP_LINK}" target="_blank" rel="noopener" data-track-cta="wa_group">↗</a>
         </div>
-        <div class="cta-card" style="background: var(--teal); border-color: var(--ink);">
-          <div class="cta-icon">${ICON_CART}</div>
-          <div class="cta-text">
-            <div class="cta-title">Join a buying group</div>
-            <div class="cta-sub">Team up, order together</div>
-          </div>
-          <a class="cta-go" href="${BUYING_GROUP_LINK}" target="_blank" rel="noopener" data-track-cta="buying_group">↗</a>
-        </div>
         <div class="cta-card orange">
           <div class="cta-icon">${ICON_DOWNLOAD}</div>
           <div class="cta-text">
@@ -1240,13 +1212,6 @@ function screenHTML(id){
             <div class="cta-sub">They'll beat your score</div>
           </div>
           <button class="cta-go" data-share-form style="cursor: pointer; border: none; background: none; padding: 0;">↗</button>
-        </div>
-        <div class="ref-card">
-          <div class="ref-card-title">🔗 Your referral link — every friend who fills this counts toward you</div>
-          <div class="ref-link-row">
-            <span class="ref-link-box">${esc(referralUrl().replace('https://','').replace('http://',''))}</span>
-            <button class="ref-copy-btn" data-copy-ref type="button">Copy</button>
-          </div>
         </div>
         <div class="center">
         </div>
@@ -1483,18 +1448,6 @@ function wireUp(id){
         logClick(el.dataset.trackCta);
       });
     });
-    const copyBtn = document.querySelector('[data-copy-ref]');
-    if(copyBtn){
-      copyBtn.addEventListener('click', () => {
-        const url = referralUrl();
-        logClick('ref_copy');
-        if(navigator.clipboard && navigator.clipboard.writeText){
-          navigator.clipboard.writeText(url).then(() => showToast('Link copied!')).catch(() => showToast(url));
-        } else {
-          showToast(url);
-        }
-      });
-    }
   }
 }
 
