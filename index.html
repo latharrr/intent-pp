@@ -420,15 +420,28 @@ function getSmartAppLink(){
   return LIVE_DEAL_LINK;
 }
 
-/* fire-and-forget POST, avoids CORS preflight against Apps Script */
+/* fire-and-forget POST, avoids CORS preflight against Apps Script.
+   Prefers sendBeacon: unlike fetch(), it's guaranteed by the browser to
+   still be attempted even if the tab closes/navigates right after this
+   call — critical since a lot of taps happen right before someone leaves
+   (closes the tab, or switches to WhatsApp). */
 function beacon(payload){
   if(!API_BASE || API_BASE.indexOf('REPLACE_WITH') === 0){ return; }
+  const body = JSON.stringify(payload);
+  try{
+    if(navigator.sendBeacon){
+      const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+      const ok = navigator.sendBeacon(API_BASE, blob);
+      if(ok) return;
+    }
+  }catch(e){}
   try{
     fetch(API_BASE, {
       method: 'POST',
       mode: 'no-cors',
+      keepalive: true,
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload)
+      body: body
     }).catch(()=>{});
   }catch(e){}
 }
@@ -505,14 +518,25 @@ function buildSubmissionPayload(status){
 }
 
 let syncTimer = null;
+function flushProgress(){
+  if(syncTimer){ clearTimeout(syncTimer); syncTimer = null; }
+  const status = currentId() === 'final' ? 'complete' : 'partial';
+  beacon(buildSubmissionPayload(status));
+}
 function syncProgress(){
   saveLocal();
   if(syncTimer) clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => {
-    const status = currentId() === 'final' ? 'complete' : 'partial';
-    beacon(buildSubmissionPayload(status));
-  }, 700);
+  syncTimer = setTimeout(flushProgress, 700);
 }
+
+/* the debounce above is fine while the user is actively tapping through,
+   but if they close the tab / switch apps before it fires, that setTimeout
+   never runs and the latest state is lost. Force an immediate flush the
+   moment the tab is hidden or the page is about to unload. */
+window.addEventListener('pagehide', flushProgress);
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'hidden') flushProgress();
+});
 
 function ensureReferralCode(){
   if(state.myRefCode) return state.myRefCode;
