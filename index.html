@@ -273,11 +273,11 @@ window.addEventListener('resize', sizeApp);
    DATA
 ========================================================= */
 const WHATSAPP_GROUP_LINK = 'https://chat.whatsapp.com/IYjvfNiB0jr24nKAVj6Oqo';
-const LIVE_DEAL_LINK      = 'https://picapool.app/REPLACE_WITH_LIVE_DEAL_LINK';
-const APP_DOWNLOAD_LINK   = 'https://play.google.com/store/apps/details?id=REPLACE_WITH_PACKAGE_NAME';
 const BUYING_GROUP_LINK   = 'https://chat.whatsapp.com/REPLACE_WITH_BUYING_GROUP_LINK';
-const APP_STORE_LINK      = 'https://apps.apple.com/app/REPLACE_WITH_IOS_APP_ID';
-const PLAY_STORE_LINK     = APP_DOWNLOAD_LINK;
+/* Instally smart link — already detects iOS vs Android vs desktop and
+   routes to the right store (App Store id 6480370782 / Play com.picapool),
+   so the app CTA doesn't need its own device-sniffing branch. */
+const APP_SMART_LINK      = 'https://picapool.instally.io/q18wya';
 
 /* =========================================================
    BACKEND (Google Sheet via Apps Script Web App)
@@ -414,12 +414,6 @@ function detectDevice(){
   return 'desktop';
 }
 const DEVICE = detectDevice();
-
-function getSmartAppLink(){
-  if(DEVICE === 'ios') return APP_STORE_LINK;
-  if(DEVICE === 'android') return PLAY_STORE_LINK;
-  return LIVE_DEAL_LINK;
-}
 
 /* fire-and-forget POST, avoids CORS preflight against Apps Script.
    Prefers sendBeacon: unlike fetch(), it's guaranteed by the browser to
@@ -1237,7 +1231,7 @@ function screenHTML(id){
             <div class="cta-title">This deal's already live</div>
             <div class="cta-sub">See it on the app</div>
           </div>
-          <a class="cta-go" href="${getSmartAppLink()}" target="_blank" rel="noopener" data-track-cta="app_download">↗</a>
+          <a class="cta-go" href="${APP_SMART_LINK}" target="_blank" rel="noopener" data-track-cta="app_download">↗</a>
         </div>
         <div class="cta-card" style="background: var(--violet); border-color: var(--ink);">
           <div class="cta-icon">${ICON_SHARE}</div>
