@@ -1,25 +1,25 @@
 /**
- * Picapool intent form — backend
- * ================================
- * This script turns a Google Sheet into the database for the intent form.
- * It creates/maintains 3 tabs: Dashboard, Submissions, Slug.
+ * PicaPool intent form — backend (final)
+ * =======================================
+ * Turns a Google Sheet into the database for the intent form: 3 tabs —
+ * Dashboard, Submissions, Slug.
  *
  * ONE-TIME SETUP
  * 1. Create a blank Google Sheet (this becomes the database).
- * 2. Extensions > Apps Script. Delete the default code, paste this whole file.
- * 3. In the function dropdown (top toolbar) pick "setupSheets", click Run.
- *    Approve the permissions prompt. This creates the 3 tabs with headers,
- *    conditional formatting (red = partial, green = complete) and the
- *    Dashboard formulas.
+ * 2. Extensions > Apps Script. Delete the placeholder code, paste this
+ *    whole file in.
+ * 3. In the function dropdown (top toolbar) pick "setupSheets", click ▶ Run.
+ *    Approve the permissions prompt. This builds all 3 tabs, headers,
+ *    red/green conditional formatting on Submissions, and the Dashboard.
  * 4. Deploy > New deployment > type "Web app".
  *      Execute as: Me
  *      Who has access: Anyone
- *    Click Deploy, copy the "Web app URL" (ends in /exec).
- * 5. Paste that URL into API_BASE near the top of index.html, redeploy the
- *    site. That's it — the form now writes to this sheet.
+ *    Deploy, copy the URL ending in /exec.
+ * 5. Paste that URL into API_BASE near the top of index.html, redeploy.
  *
- * If you ever add new columns to SUBMISSION_HEADERS / SLUG_HEADERS, re-run
- * setupSheets() — it only adds missing headers, it never deletes data.
+ * Re-run setupSheets() any time after pulling a newer version of this file —
+ * it's safe: existing data is never touched, only missing columns get
+ * appended and the Dashboard gets rebuilt from the live formulas.
  */
 
 const SUBMISSIONS_SHEET = 'Submissions';
@@ -35,7 +35,7 @@ const SUBMISSION_HEADERS = [
   'waGroupClickedAt', 'buyingGroupClickedAt', 'appDownloadClickedAt',
   'referralSharedAt', 'referralCopiedAt'
 ];
-// column indexes (1-based) for quick reference
+// 1-based column indexes, kept in sync with SUBMISSION_HEADERS above
 const S_SESSION = 1, S_FIRSTSEEN = 2, S_LASTUPDATED = 3, S_STATUS = 4, S_SLUG = 5;
 
 const SLUG_HEADERS = [
@@ -94,9 +94,8 @@ function getSheet(name, headers) {
     sh.setFrozenRows(1);
     return sh;
   }
-  // schema grew since this sheet was first set up (e.g. new tracked
-  // columns added later) — append only what's missing, never touch
-  // existing columns or data.
+  // schema grew since this sheet was first set up — append only what's
+  // missing, at the end, never touching existing columns or data.
   const missing = headers.filter(h => existing.indexOf(h) === -1);
   if (missing.length) {
     sh.getRange(1, existing.length + 1, 1, missing.length).setValues([missing]);
@@ -115,9 +114,10 @@ function findRow(sheet, keyCol, key) {
 }
 
 /* =========================================================
-   SUBMISSIONS — one row per visitor session, upserted on
-   every screen change. Red while partial, green once the
-   'final' screen is reached (see conditional formatting).
+   SUBMISSIONS — one row per visitor session, upserted on every
+   screen change. Red while partial, green once the 'final' screen
+   is reached (conditional formatting). Click columns record which
+   named user tapped which outbound link, and when.
 ========================================================= */
 function handleSubmit(body) {
   const sh = getSheet(SUBMISSIONS_SHEET, SUBMISSION_HEADERS);
@@ -144,16 +144,15 @@ function handleSubmit(body) {
     sh.appendRow(rowData);
   }
 
-  // only bump the completions counter once per session
   if (body.status === 'complete' && !wasComplete) {
     bumpSlugCounter(body.slug, L_COMPLETIONS);
   }
 }
 
 /* =========================================================
-   SLUG — one row per trackable link (campaign tag, referral
-   code, or a reserved redirect shortlink like /wa or /buy).
-   Upserted on every visit/click.
+   SLUG — one row per trackable link (campaign tag, referral code,
+   or a reserved redirect shortlink like /wa or /buy). Upserted on
+   every visit/click.
 ========================================================= */
 function handleTrack(body) {
   if (!body.slug) return;
@@ -167,7 +166,7 @@ function handleTrack(body) {
     sh.getRange(row, col).setValue(current + 1);
     sh.getRange(row, L_LASTSEEN).setValue(now);
   } else {
-    const newRow = [
+    sh.appendRow([
       body.slug,
       body.redirectType || 'campaign',
       body.dest || '',
@@ -175,8 +174,7 @@ function handleTrack(body) {
       body.kind === 'visit' ? 1 : 0,
       body.kind === 'click' ? 1 : 0,
       0, 0
-    ];
-    sh.appendRow(newRow);
+    ]);
   }
 
   if (body.kind === 'visit') bumpSlugCounter(body.slug, L_STARTS);
@@ -192,9 +190,9 @@ function bumpSlugCounter(slug, col) {
   }
 }
 
-/* pre-registers a referral code with its owner's name, so the
-   Dashboard can show "who brought how many people" even before
-   that referral link gets its first click. */
+/* pre-registers a referral code with its owner's name, so the Dashboard
+   can show "who brought how many people" even before that link's first
+   click. */
 function handleCreateLink(body) {
   const sh = getSheet(SLUG_SHEET, SLUG_HEADERS);
   const row = findRow(sh, L_SLUG, body.slug);
@@ -231,85 +229,192 @@ function applyConditionalFormatting() {
   sh.setConditionalFormatRules([partial, complete]);
 }
 
+/* =========================================================
+   DASHBOARD — brand-colored KPI tiles, text-bar mini charts for
+   the funnel/device/commitment breakdowns, and bordered, banded,
+   properly-headed tables for the link and submission detail.
+   Built with a running row cursor so nothing needs hand-counted
+   row numbers, and safe to re-run any time (sh.clear() first).
+========================================================= */
 function buildDashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sh = ss.getSheetByName(DASHBOARD_SHEET);
   if (!sh) sh = ss.insertSheet(DASHBOARD_SHEET, 0);
   sh.clear();
+  sh.clearFormats();
+  sh.getCharts().forEach(c => sh.removeChart(c));
+  // a prior run may have left merges/banding behind — clear() doesn't
+  // remove those, and re-applying over an overlapping range would throw.
+  if (sh.getMaxRows() > 0 && sh.getMaxColumns() > 0) {
+    sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart();
+  }
+  sh.getBandings().forEach(b => b.remove());
   sh.setTabColor('#FF4B18');
+  sh.setHiddenGridlines(true);
 
-  sh.getRange('A1').setValue('Picapool — Intent Form Dashboard')
-    .setFontSize(16).setFontWeight('bold');
-  sh.getRange('A2').setValue('Auto-updates from Submissions + Slug. Do not edit formula cells.')
-    .setFontStyle('italic').setFontColor('#666666');
+  const INK = '#15130F', ORANGE = '#FF4B18', CREAM = '#FFF4EB', CREAM_DEEP = '#FFE7D6',
+        TEAL = '#0FAE86', VIOLET = '#6C4CF1', GOLD = '#FFC94D', SOFT = '#5B5449', FAINT = '#A69C90';
+  const COLS = 9;
 
-  // build top-to-bottom with a running cursor so section positions never
-  // have to be hand-counted again when rows are added/removed above.
-  let r = 3;
-  const bold = (row, cols) => sh.getRange(row, 1, 1, cols || 1).setFontWeight('bold');
-  const put = (label, formula) => { sh.getRange(r, 1, 1, 2).setValues([[label, formula || '']]); r++; };
-  const section = (label) => { put(label); bold(r - 1); };
-  const blank = () => { r++; };
-  const queryBlock = (formula, reserve) => {
+  // ---- title banner ----
+  sh.getRange(1, 1, 1, COLS).merge().setValue('🟠  PicaPool — Intent Form Dashboard')
+    .setBackground(ORANGE).setFontColor('#FFFFFF').setFontSize(18).setFontWeight('bold')
+    .setVerticalAlignment('middle');
+  sh.setRowHeight(1, 44);
+  sh.getRange(2, 1, 1, COLS).merge()
+    .setValue("Live view of Submissions + Slug — updates automatically, don't edit formula cells.")
+    .setBackground(CREAM_DEEP).setFontColor(SOFT).setFontStyle('italic').setVerticalAlignment('middle');
+  sh.setRowHeight(2, 22);
+
+  let r = 4;
+  const section = (label) => {
+    sh.getRange(r, 1, 1, COLS).merge().setValue(label)
+      .setBackground(INK).setFontColor('#FFFFFF').setFontWeight('bold').setFontSize(11)
+      .setVerticalAlignment('middle');
+    sh.setRowHeight(r, 24);
+    r++;
+  };
+  const blank = (h) => { sh.setRowHeight(r, h || 8); r++; };
+  const put = (label, formula, color) => {
+    sh.getRange(r, 1, 1, 4).merge().setValue(label).setFontWeight('bold').setVerticalAlignment('middle');
+    const v = sh.getRange(r, 5, 1, 5).merge();
+    v.setFormula(formula).setFontWeight('bold').setHorizontalAlignment('right')
+      .setVerticalAlignment('middle').setFontColor(color || INK);
+    r++;
+  };
+  const barRow = (label, valueExpr, denomExpr, color) => {
+    sh.getRange(r, 1).setValue(label).setFontWeight('bold').setFontSize(11).setVerticalAlignment('middle');
+    const val = sh.getRange(r, 8, 1, 2).merge();
+    val.setFormula('=' + valueExpr).setFontWeight('bold').setHorizontalAlignment('right')
+      .setFontColor(color).setVerticalAlignment('middle').setNumberFormat('#,##0');
+    sh.getRange(r, 2, 1, 6).merge()
+      .setFormula('=REPT("█", MIN(34, ROUND(IFERROR((' + valueExpr + ')/MAX(1,' + denomExpr + ')*34,0),0)))')
+      .setFontColor(color).setFontFamily('Courier New').setVerticalAlignment('middle');
+    r++;
+  };
+  const tableHeader = (labels) => {
+    sh.getRange(r, 1, 1, labels.length).setValues([labels])
+      .setBackground(CREAM).setFontColor(INK).setFontWeight('bold')
+      .setBorder(true, true, true, true, false, false, '#E3DCD0', SpreadsheetApp.BorderStyle.SOLID);
+    r++;
+  };
+  const tableBody = (formula, rows, cols) => {
+    // formula goes only in the anchor cell — QUERY's array result spills
+    // into the rest of this (empty) range on its own. The reserved
+    // rows/cols just get the border + banding so the block looks like a
+    // table even before/regardless of how many rows the query returns.
     sh.getRange(r, 1).setFormula(formula);
-    r += reserve; // leave room for however many result rows the query can return
+    const range = sh.getRange(r, 1, rows, cols);
+    range.setBorder(true, true, true, true, true, true, '#E3DCD0', SpreadsheetApp.BorderStyle.SOLID);
+    try { range.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, false, false); } catch (e) {}
+    r += rows;
   };
 
-  section('OVERVIEW');
-  put('Total sessions started', '=COUNTA(Submissions!A2:A)');
-  put('Completed submissions', '=COUNTIF(Submissions!D2:D,"complete")');
-  put('Partial / dropped off', '=COUNTIF(Submissions!D2:D,"partial")');
-  put('Completion rate', '=IFERROR(COUNTIF(Submissions!D2:D,"complete")/COUNTA(Submissions!A2:A),0)');
-  put('Avg categories filled (completed)', '=IFERROR(AVERAGEIF(Submissions!D2:D,"complete",Submissions!L2:L),0)');
+  // ---- KPI tiles ----
+  const tiles = [
+    { label: 'SESSIONS STARTED', formula: '=COUNTA(Submissions!A2:A)', color: INK, percent: false },
+    { label: 'COMPLETED', formula: '=COUNTIF(Submissions!D2:D,"complete")', color: TEAL, percent: false },
+    { label: 'COMPLETION RATE', formula: '=IFERROR(COUNTIF(Submissions!D2:D,"complete")/COUNTA(Submissions!A2:A),0)', color: ORANGE, percent: true },
+    { label: 'REFERRAL SIGNUPS', formula: '=IFERROR(SUMIF(Slug!B2:B500,"referral",Slug!I2:I500),0)', color: VIOLET, percent: false }
+  ];
+  const tileCols = [1, 3, 5, 7];
+  tiles.forEach((t, i) => {
+    const c = tileCols[i];
+    sh.getRange(r, c, 1, 2).merge().setValue(t.label)
+      .setBackground(t.color).setFontColor('#FFFFFF').setFontSize(9).setFontWeight('bold')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle');
+    const val = sh.getRange(r + 1, c, 2, 2).merge();
+    val.setFormula(t.formula).setBackground('#FFF8F2').setFontColor(t.color)
+      .setFontSize(26).setFontWeight('bold').setHorizontalAlignment('center').setVerticalAlignment('middle')
+      .setNumberFormat(t.percent ? '0.0%' : '#,##0');
+  });
+  sh.setRowHeight(r, 20); sh.setRowHeight(r + 1, 26); sh.setRowHeight(r + 2, 26);
+  r += 3;
+  blank(14);
+
+  // ---- funnel ----
+  section('FUNNEL');
+  barRow('Visits (all links)', 'SUMPRODUCT(Slug!F2:F500)', 'SUMPRODUCT(Slug!F2:F500)', SOFT);
+  barRow('Form starts', 'COUNTA(Submissions!A2:A)', 'SUMPRODUCT(Slug!F2:F500)', ORANGE);
+  barRow('Completed', 'COUNTIF(Submissions!D2:D,"complete")', 'SUMPRODUCT(Slug!F2:F500)', TEAL);
   blank();
 
-  section('ENGAGEMENT LINKS (total clicks, all visitors)');
-  put('WhatsApp group — clicks', '=SUMPRODUCT(((Slug!A2:A500="wa")+(Slug!A2:A500="wa_group")+(Slug!A2:A500="whatsapp"))*Slug!G2:G500)');
-  put('Buying group — clicks', '=SUMPRODUCT(((Slug!A2:A500="buy")+(Slug!A2:A500="buying_group")+(Slug!A2:A500="buying"))*Slug!G2:G500)');
-  put('App download — clicks', '=IFERROR(SUMIF(Slug!A2:A500,"app_download",Slug!G2:G500),0)');
-  put('Referral link shares (tap)', '=IFERROR(SUMIF(Slug!A2:A500,"referral_share",Slug!G2:G500),0)');
+  // ---- device breakdown ----
+  section('DEVICE BREAKDOWN');
+  barRow('iOS', 'COUNTIF(Submissions!R2:R2000,"ios")', 'COUNTA(Submissions!A2:A)', VIOLET);
+  barRow('Android', 'COUNTIF(Submissions!R2:R2000,"android")', 'COUNTA(Submissions!A2:A)', TEAL);
+  barRow('Desktop', 'COUNTIF(Submissions!R2:R2000,"desktop")', 'COUNTA(Submissions!A2:A)', ORANGE);
   blank();
 
-  section('ENGAGEMENT LINKS (unique named users, from Submissions)');
-  put('Users who clicked WA group', '=COUNTIF(Submissions!V2:V2000,"<>")');
-  put('Users who clicked buying group', '=COUNTIF(Submissions!W2:W2000,"<>")');
-  put('Users who clicked app download', '=COUNTIF(Submissions!X2:X2000,"<>")');
-  put('Users who shared their referral link', '=COUNTIF(Submissions!Y2:Y2000,"<>")');
+  // ---- commitment breakdown ----
+  section('COMMITMENT (of those who reached that screen)');
+  barRow('Count me in', 'COUNTIF(Submissions!N2:N2000,"yes")', 'COUNTIF(Submissions!N2:N2000,"<>")', TEAL);
+  barRow('Depends on price', 'COUNTIF(Submissions!N2:N2000,"depends")', 'COUNTIF(Submissions!N2:N2000,"<>")', GOLD);
+  barRow('Just curious', 'COUNTIF(Submissions!N2:N2000,"curious")', 'COUNTIF(Submissions!N2:N2000,"<>")', FAINT);
   blank();
 
+  // ---- engagement links table ----
+  section('ENGAGEMENT LINKS');
+  tableHeader(['Link', 'Total clicks (all visitors)', 'Unique users (named)']);
+  const engRows = [
+    ['WhatsApp group', '=SUMPRODUCT(((Slug!A2:A500="wa")+(Slug!A2:A500="wa_group")+(Slug!A2:A500="whatsapp"))*Slug!G2:G500)', '=COUNTIF(Submissions!V2:V2000,"<>")'],
+    ['Buying group', '=SUMPRODUCT(((Slug!A2:A500="buy")+(Slug!A2:A500="buying_group")+(Slug!A2:A500="buying"))*Slug!G2:G500)', '=COUNTIF(Submissions!W2:W2000,"<>")'],
+    ['App download', '=IFERROR(SUMIF(Slug!A2:A500,"app_download",Slug!G2:G500),0)', '=COUNTIF(Submissions!X2:X2000,"<>")'],
+    ['Referral shares', '=IFERROR(SUMIF(Slug!A2:A500,"referral_share",Slug!G2:G500),0)', '=COUNTIF(Submissions!Y2:Y2000,"<>")']
+  ];
+  const engRange = sh.getRange(r, 1, engRows.length, 3);
+  engRange.setValues(engRows);
+  engRange.setBorder(true, true, true, true, true, true, '#E3DCD0', SpreadsheetApp.BorderStyle.SOLID);
+  try { engRange.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, false, false); } catch (e) {}
+  r += engRows.length;
+  blank();
+
+  // ---- referrals ----
   section('REFERRALS');
-  put('Total referral codes created', '=COUNTIF(Slug!B2:B500,"referral")');
-  put('Total signups via referral', '=SUMIF(Slug!B2:B500,"referral",Slug!I2:I500)');
+  put('Total referral codes created', '=COUNTIF(Slug!B2:B500,"referral")', VIOLET);
+  put('Total signups via referral', '=IFERROR(SUMIF(Slug!B2:B500,"referral",Slug!I2:I500),0)', VIOLET);
   blank();
 
+  // ---- top campaign / slug links ----
   section('TOP CAMPAIGN / SLUG LINKS (by visits)');
-  queryBlock(
+  tableHeader(['Slug', 'Type', 'Destination / owner', 'Visits', 'Clicks', 'Form starts', 'Completions']);
+  tableBody(
     '=IFERROR(QUERY(Slug!A2:I500,' +
     '"select A, B, C, F, G, H, I where A is not null order by F desc limit 15", 0), "No data yet")',
-    16
+    15, 7
   );
+  blank();
 
+  // ---- top referrers ----
   section('TOP REFERRERS (by signups)');
-  queryBlock(
+  tableHeader(['Referral code', 'Referrer', 'Visits', 'Form starts', 'Completions']);
+  tableBody(
     '=IFERROR(QUERY(Slug!A2:I500,' +
     '"select A, C, F, H, I where B = \'referral\' order by I desc, H desc limit 15", 0), "No referrals yet")',
-    16
+    15, 5
   );
+  blank();
 
-  section('WHO CLICKED WHAT (name, phone, and every link they tapped)');
-  queryBlock(
+  // ---- who clicked what ----
+  section('WHO CLICKED WHAT (name, phone, every link they tapped)');
+  tableHeader(['Name', 'Phone', 'Status', 'WA group', 'Buying group', 'App download', 'Referral share']);
+  tableBody(
     '=IFERROR(QUERY(Submissions!A2:Z2000,' +
     '"select H, I, D, V, W, X, Y where H <> \'\' order by C desc limit 25", 0), "No submissions yet")',
-    26
+    25, 7
   );
+  blank();
 
+  // ---- recent completions ----
   section('RECENT COMPLETED SUBMISSIONS');
-  queryBlock(
+  tableHeader(['Name', 'Phone', 'Slug', 'Referred by', 'Categories', 'Commitment', 'Completed at']);
+  tableBody(
     '=IFERROR(QUERY(Submissions!A2:Z2000,' +
     '"select H, I, E, F, J, N, C where D = \'complete\' order by C desc limit 20", 0), "No completions yet")',
-    21
+    20, 7
   );
 
-  sh.autoResizeColumns(1, 9);
-  sh.setColumnWidth(1, 260);
+  sh.setColumnWidth(1, 190);
+  for (let c = 2; c <= COLS; c++) sh.setColumnWidth(c, 105);
+  sh.setFrozenRows(2);
 }
