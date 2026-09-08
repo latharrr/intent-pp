@@ -365,7 +365,8 @@ const state = {
   gameActive: false,
   timeRemaining: 180,
   events: [],
-  myRefCode: null
+  myRefCode: null,
+  clicks: { wa_group: 0, buying_group: 0, app_download: 0, referral_share: 0, ref_copy: 0 }
 };
 
 /* =========================================================
@@ -458,9 +459,19 @@ function trackSlugEvent(slug, kind, extra){
   }, extra || {}));
 }
 
-function logEvent(screenId){
-  state.events.push({ t: Date.now(), screen: screenId });
+function logEvent(screenId, action){
+  state.events.push({ t: Date.now(), screen: screenId, action: action || 'view' });
   if(state.events.length > 300) state.events = state.events.slice(-300);
+}
+
+/* records a click on a specific outbound link (WA group, buying group, app
+   download, referral share/copy) against THIS user's own Submissions row,
+   not just the aggregate Slug counter — so opening that row next to their
+   name/phone shows exactly what they did and when. */
+function logClick(type){
+  state.clicks[type] = Date.now();
+  logEvent(currentId(), 'click_' + type);
+  flushProgress();
 }
 
 function saveLocal(){
@@ -469,7 +480,8 @@ function saveLocal(){
       pos: state.pos, order: state.order, name: state.name, phone: state.phone,
       categories: state.categories, otherCategoryText: state.otherCategoryText,
       brandSel: state.brandSel, openGroup: state.openGroup, commitment: state.commitment,
-      timeRemaining: state.timeRemaining, events: state.events, myRefCode: state.myRefCode
+      timeRemaining: state.timeRemaining, events: state.events, myRefCode: state.myRefCode,
+      clicks: state.clicks
     }));
   }catch(e){}
 }
@@ -511,6 +523,11 @@ function buildSubmissionPayload(status){
     currentScreen: currentId(),
     screensReached: state.pos,
     totalScreens: state.order.length - 1,
+    waGroupClickedAt: state.clicks.wa_group || '',
+    buyingGroupClickedAt: state.clicks.buying_group || '',
+    appDownloadClickedAt: state.clicks.app_download || '',
+    referralSharedAt: state.clicks.referral_share || '',
+    referralCopiedAt: state.clicks.ref_copy || '',
     device: DEVICE,
     userAgent: navigator.userAgent || '',
     eventsJSON: JSON.stringify(state.events.slice(-100))
@@ -1458,6 +1475,7 @@ function wireUp(id){
       shareBtn.addEventListener('click', () => {
         const text = "Think you can beat my PG savings score? 🏃‍♂️💨 Take the 3-minute Picapool speed challenge: " + referralUrl();
         trackSlugEvent(state.myRefCode || entrySlug, 'click', { redirectType: 'referral_share' });
+        logClick('referral_share');
         if(navigator.share){
           navigator.share({ text }).catch(()=>{});
         } else {
@@ -1468,12 +1486,14 @@ function wireUp(id){
     document.querySelectorAll('[data-track-cta]').forEach(el => {
       el.addEventListener('click', () => {
         trackSlugEvent(el.dataset.trackCta, 'click', { redirectType: el.dataset.trackCta });
+        logClick(el.dataset.trackCta);
       });
     });
     const copyBtn = document.querySelector('[data-copy-ref]');
     if(copyBtn){
       copyBtn.addEventListener('click', () => {
         const url = referralUrl();
+        logClick('ref_copy');
         if(navigator.clipboard && navigator.clipboard.writeText){
           navigator.clipboard.writeText(url).then(() => showToast('Link copied!')).catch(() => showToast(url));
         } else {

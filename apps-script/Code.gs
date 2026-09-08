@@ -30,7 +30,10 @@ const SUBMISSION_HEADERS = [
   'sessionId', 'firstSeen', 'lastUpdated', 'status', 'slug', 'referredBy', 'myRefCode',
   'name', 'phone', 'categories', 'otherCategoryText', 'categoriesFilled', 'categoriesTotal',
   'commitment', 'currentScreen', 'screensReached', 'totalScreens', 'device', 'userAgent',
-  'brandSelJSON', 'eventsJSON'
+  'brandSelJSON', 'eventsJSON',
+  // per-user click detail — who clicked what, and when (blank = never clicked)
+  'waGroupClickedAt', 'buyingGroupClickedAt', 'appDownloadClickedAt',
+  'referralSharedAt', 'referralCopiedAt'
 ];
 // column indexes (1-based) for quick reference
 const S_SESSION = 1, S_FIRSTSEEN = 2, S_LASTUPDATED = 3, S_STATUS = 4, S_SLUG = 5;
@@ -68,6 +71,10 @@ function textOut(msg) {
   return ContentService.createTextOutput(msg).setMimeType(ContentService.MimeType.TEXT);
 }
 
+function epochToDate(ms) {
+  return ms ? new Date(Number(ms)) : '';
+}
+
 /* =========================================================
    SHEET HELPERS
 ========================================================= */
@@ -76,11 +83,23 @@ function getSheet(name, headers) {
   let sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sh.setFrozenRows(1);
+    return sh;
   }
-  const existing = sh.getRange(1, 1, 1, Math.max(headers.length, sh.getLastColumn() || 1)).getValues()[0];
+  const lastCol = sh.getLastColumn();
+  const existing = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0] : [];
   if (!existing[0]) {
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
     sh.setFrozenRows(1);
+    return sh;
+  }
+  // schema grew since this sheet was first set up (e.g. new tracked
+  // columns added later) — append only what's missing, never touch
+  // existing columns or data.
+  const missing = headers.filter(h => existing.indexOf(h) === -1);
+  if (missing.length) {
+    sh.getRange(1, existing.length + 1, 1, missing.length).setValues([missing]);
   }
   return sh;
 }
@@ -112,7 +131,10 @@ function handleSubmit(body) {
     body.name || '', body.phone || '', body.categories || '', body.otherCategoryText || '',
     body.categoriesFilled || 0, body.categoriesTotal || 0, body.commitment || '',
     body.currentScreen || '', body.screensReached || 0, body.totalScreens || 0,
-    body.device || '', body.userAgent || '', body.brandSelJSON || '', body.eventsJSON || ''
+    body.device || '', body.userAgent || '', body.brandSelJSON || '', body.eventsJSON || '',
+    epochToDate(body.waGroupClickedAt), epochToDate(body.buyingGroupClickedAt),
+    epochToDate(body.appDownloadClickedAt), epochToDate(body.referralSharedAt),
+    epochToDate(body.referralCopiedAt)
   ];
 
   const wasComplete = row > 0 && sh.getRange(row, S_STATUS).getValue() === 'complete';
@@ -221,48 +243,71 @@ function buildDashboard() {
   sh.getRange('A2').setValue('Auto-updates from Submissions + Slug. Do not edit formula cells.')
     .setFontStyle('italic').setFontColor('#666666');
 
-  const rows = [
-    ['', ''],
-    ['OVERVIEW', ''],
-    ['Total sessions started', '=COUNTA(Submissions!A2:A)'],
-    ['Completed submissions', '=COUNTIF(Submissions!D2:D,"complete")'],
-    ['Partial / dropped off', '=COUNTIF(Submissions!D2:D,"partial")'],
-    ['Completion rate', '=IFERROR(COUNTIF(Submissions!D2:D,"complete")/COUNTA(Submissions!A2:A),0)'],
-    ['Avg categories filled (completed)', '=IFERROR(AVERAGEIF(Submissions!D2:D,"complete",Submissions!L2:L),0)'],
-    ['', ''],
-    ['ENGAGEMENT LINKS', ''],
-    ['WhatsApp group — clicks', '=SUMPRODUCT(((Slug!A2:A500="wa")+(Slug!A2:A500="wa_group")+(Slug!A2:A500="whatsapp"))*Slug!G2:G500)'],
-    ['Buying group — clicks', '=SUMPRODUCT(((Slug!A2:A500="buy")+(Slug!A2:A500="buying_group")+(Slug!A2:A500="buying"))*Slug!G2:G500)'],
-    ['App download — clicks', '=IFERROR(SUMIF(Slug!A2:A500,"app_download",Slug!G2:G500),0)'],
-    ['Referral link shares (tap)', '=IFERROR(COUNTIF(Slug!B2:B500,"referral"),0)'],
-    ['', ''],
-    ['REFERRALS', ''],
-    ['Total referral codes created', '=COUNTIF(Slug!B2:B500,"referral")'],
-    ['Total signups via referral', '=SUMIF(Slug!B2:B500,"referral",Slug!I2:I500)'],
-    ['', ''],
-    ['TOP CAMPAIGN / SLUG LINKS (by visits)', ''],
-  ];
-  sh.getRange(3, 1, rows.length, 2).setValues(rows);
-  sh.getRange(4, 1, 1, 1).setFontWeight('bold');
-  sh.getRange(11, 1, 1, 1).setFontWeight('bold');
-  sh.getRange(17, 1, 1, 1).setFontWeight('bold');
-  sh.getRange(21, 1, 1, 2).setFontWeight('bold');
+  // build top-to-bottom with a running cursor so section positions never
+  // have to be hand-counted again when rows are added/removed above.
+  let r = 3;
+  const bold = (row, cols) => sh.getRange(row, 1, 1, cols || 1).setFontWeight('bold');
+  const put = (label, formula) => { sh.getRange(r, 1, 1, 2).setValues([[label, formula || '']]); r++; };
+  const section = (label) => { put(label); bold(r - 1); };
+  const blank = () => { r++; };
+  const queryBlock = (formula, reserve) => {
+    sh.getRange(r, 1).setFormula(formula);
+    r += reserve; // leave room for however many result rows the query can return
+  };
 
-  sh.getRange('A22').setFormula(
+  section('OVERVIEW');
+  put('Total sessions started', '=COUNTA(Submissions!A2:A)');
+  put('Completed submissions', '=COUNTIF(Submissions!D2:D,"complete")');
+  put('Partial / dropped off', '=COUNTIF(Submissions!D2:D,"partial")');
+  put('Completion rate', '=IFERROR(COUNTIF(Submissions!D2:D,"complete")/COUNTA(Submissions!A2:A),0)');
+  put('Avg categories filled (completed)', '=IFERROR(AVERAGEIF(Submissions!D2:D,"complete",Submissions!L2:L),0)');
+  blank();
+
+  section('ENGAGEMENT LINKS (total clicks, all visitors)');
+  put('WhatsApp group — clicks', '=SUMPRODUCT(((Slug!A2:A500="wa")+(Slug!A2:A500="wa_group")+(Slug!A2:A500="whatsapp"))*Slug!G2:G500)');
+  put('Buying group — clicks', '=SUMPRODUCT(((Slug!A2:A500="buy")+(Slug!A2:A500="buying_group")+(Slug!A2:A500="buying"))*Slug!G2:G500)');
+  put('App download — clicks', '=IFERROR(SUMIF(Slug!A2:A500,"app_download",Slug!G2:G500),0)');
+  put('Referral link shares (tap)', '=IFERROR(SUMIF(Slug!A2:A500,"referral_share",Slug!G2:G500),0)');
+  blank();
+
+  section('ENGAGEMENT LINKS (unique named users, from Submissions)');
+  put('Users who clicked WA group', '=COUNTIF(Submissions!V2:V2000,"<>")');
+  put('Users who clicked buying group', '=COUNTIF(Submissions!W2:W2000,"<>")');
+  put('Users who clicked app download', '=COUNTIF(Submissions!X2:X2000,"<>")');
+  put('Users who shared their referral link', '=COUNTIF(Submissions!Y2:Y2000,"<>")');
+  blank();
+
+  section('REFERRALS');
+  put('Total referral codes created', '=COUNTIF(Slug!B2:B500,"referral")');
+  put('Total signups via referral', '=SUMIF(Slug!B2:B500,"referral",Slug!I2:I500)');
+  blank();
+
+  section('TOP CAMPAIGN / SLUG LINKS (by visits)');
+  queryBlock(
     '=IFERROR(QUERY(Slug!A2:I500,' +
-    '"select A, B, C, F, G, H, I where A is not null order by F desc limit 15", 0), "No data yet")'
+    '"select A, B, C, F, G, H, I where A is not null order by F desc limit 15", 0), "No data yet")',
+    16
   );
 
-  sh.getRange('A38').setValue('TOP REFERRERS (by signups)').setFontWeight('bold');
-  sh.getRange('A39').setFormula(
+  section('TOP REFERRERS (by signups)');
+  queryBlock(
     '=IFERROR(QUERY(Slug!A2:I500,' +
-    '"select A, C, F, H, I where B = \'referral\' order by I desc, H desc limit 15", 0), "No referrals yet")'
+    '"select A, C, F, H, I where B = \'referral\' order by I desc, H desc limit 15", 0), "No referrals yet")',
+    16
   );
 
-  sh.getRange('A55').setValue('RECENT COMPLETED SUBMISSIONS').setFontWeight('bold');
-  sh.getRange('A56').setFormula(
-    '=IFERROR(QUERY(Submissions!A2:U2000,' +
-    '"select H, I, E, F, J, N, C where D = \'complete\' order by C desc limit 20", 0), "No completions yet")'
+  section('WHO CLICKED WHAT (name, phone, and every link they tapped)');
+  queryBlock(
+    '=IFERROR(QUERY(Submissions!A2:Z2000,' +
+    '"select H, I, D, V, W, X, Y where H <> \'\' order by C desc limit 25", 0), "No submissions yet")',
+    26
+  );
+
+  section('RECENT COMPLETED SUBMISSIONS');
+  queryBlock(
+    '=IFERROR(QUERY(Submissions!A2:Z2000,' +
+    '"select H, I, E, F, J, N, C where D = \'complete\' order by C desc limit 20", 0), "No completions yet")',
+    21
   );
 
   sh.autoResizeColumns(1, 9);
