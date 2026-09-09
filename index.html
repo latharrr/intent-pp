@@ -675,85 +675,107 @@ trackSlugEvent(entrySlug, 'visit', { resumed: RESUMED, ref: incomingRef });
 /* =========================================================
    AUDIO - Web Audio API Sound Effects
 ========================================================= */
-const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+/* Sound is decoration. The form and its tracking must never depend on it.
+
+   This used to be a bare `const audioContext = new (window.AudioContext ||
+   window.webkitAudioContext)()` at the top level of the script. Any browser
+   that refuses to construct one — in-app WhatsApp/Instagram webviews and
+   locked-down Android WebViews among them, which is how most people open a
+   shared link — threw right here and killed every line that followed: the
+   first render, all the event binding, and every tracking beacon. The page
+   sat there dead and the Sheet never saw a row.
+
+   So: build it lazily on first use, inside a try, and let any sound no-op if
+   the browser won't play along. */
+let audioContext = null, audioUnavailable = false;
+
+function audio(){
+  if(audioUnavailable) return null;
+  if(!audioContext){
+    try{
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if(!Ctx){ audioUnavailable = true; return null; }
+      audioContext = new Ctx();
+    }catch(e){ audioUnavailable = true; return null; }
+  }
+  // browsers hold the context suspended until a user gesture unlocks it
+  if(audioContext.state === 'suspended'){ try{ audioContext.resume(); }catch(e){} }
+  return audioContext;
+}
+
+/* every sound routes through here, so a Web Audio failure at any point is a
+   missing beep and nothing else */
+function withAudio(play){
+  const ctx = audio();
+  if(!ctx) return;
+  try{ play(ctx); }catch(e){}
+}
 
 function playChipSound(){
-  const now = audioContext.currentTime;
-  const osc = audioContext.createOscillator();
-  const gain = audioContext.createGain();
-  osc.connect(gain);
-  gain.connect(audioContext.destination);
-  osc.frequency.setValueAtTime(800, now);
-  osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
-  gain.gain.setValueAtTime(0.3, now);
-  gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
-  osc.start(now);
-  osc.stop(now + 0.1);
+  withAudio(ctx => {
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(800, now);
+    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  });
 }
 
 function playDialSound(){
-  const now = audioContext.currentTime;
-  const osc = audioContext.createOscillator();
-  const gain = audioContext.createGain();
-  osc.connect(gain);
-  gain.connect(audioContext.destination);
-  osc.frequency.setValueAtTime(400, now);
-  osc.frequency.linearRampToValueAtTime(600, now + 0.15);
-  gain.gain.setValueAtTime(0.25, now);
-  gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
-  osc.start(now);
-  osc.stop(now + 0.15);
+  withAudio(ctx => {
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(400, now);
+    osc.frequency.linearRampToValueAtTime(600, now + 0.15);
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  });
 }
 
 function playVictorySound(){
-  const now = audioContext.currentTime;
-  
-  // First note
-  const osc1 = audioContext.createOscillator();
-  const gain1 = audioContext.createGain();
-  osc1.connect(gain1);
-  gain1.connect(audioContext.destination);
-  osc1.frequency.setValueAtTime(523.25, now); // C5
-  gain1.gain.setValueAtTime(0.3, now);
-  gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-  osc1.start(now);
-  osc1.stop(now + 0.25);
-  
-  // Second note
-  const osc2 = audioContext.createOscillator();
-  const gain2 = audioContext.createGain();
-  osc2.connect(gain2);
-  gain2.connect(audioContext.destination);
-  osc2.frequency.setValueAtTime(659.25, now + 0.15); // E5
-  gain2.gain.setValueAtTime(0.3, now + 0.15);
-  gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
-  osc2.start(now + 0.15);
-  osc2.stop(now + 0.4);
-  
-  // Third note
-  const osc3 = audioContext.createOscillator();
-  const gain3 = audioContext.createGain();
-  osc3.connect(gain3);
-  gain3.connect(audioContext.destination);
-  osc3.frequency.setValueAtTime(783.99, now + 0.3); // G5
-  gain3.gain.setValueAtTime(0.3, now + 0.3);
-  gain3.gain.exponentialRampToValueAtTime(0.01, now + 0.65);
-  osc3.start(now + 0.3);
-  osc3.stop(now + 0.65);
+  withAudio(ctx => {
+    const now = ctx.currentTime;
+    // C5, E5, G5 in sequence
+    [[523.25, 0], [659.25, 0.15], [783.99, 0.3]].forEach(note => {
+      const freq = note[0], at = now + note[1];
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.setValueAtTime(freq, at);
+      gain.gain.setValueAtTime(0.3, at);
+      gain.gain.exponentialRampToValueAtTime(0.01, at + 0.25);
+      osc.start(at);
+      osc.stop(at + 0.25);
+    });
+  });
 }
 
 function playGameStartSound(){
-  const now = audioContext.currentTime;
-  const osc = audioContext.createOscillator();
-  const gain = audioContext.createGain();
-  osc.connect(gain);
-  gain.connect(audioContext.destination);
-  osc.frequency.setValueAtTime(1200, now);
-  osc.frequency.exponentialRampToValueAtTime(1800, now + 0.3);
-  gain.gain.setValueAtTime(0.3, now);
-  gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-  osc.start(now);
-  osc.stop(now + 0.3);
+  withAudio(ctx => {
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.setValueAtTime(1200, now);
+    osc.frequency.exponentialRampToValueAtTime(1800, now + 0.3);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  });
 }
 
 let timerInterval = null;
