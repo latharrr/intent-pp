@@ -276,6 +276,23 @@ const APP_SMART_LINK      = 'https://picapool.instally.io/q18wya';
 ========================================================= */
 const API_BASE = 'https://script.google.com/macros/s/AKfycbz_UvUdo574oEKjyLMYyn6gGK3G5L6eccuxTwIGVwdR-3ayjdVKYI87RZfYwJ9f8ywf9Q/exec';
 
+/* Which build of this file is actually live. It rides along on every
+   submission as `clientBuild`, so the Sheet itself answers "did the
+   redeploy happen" — a row stamped with an older build came from a form
+   that Vercel never updated, and no amount of backend work will fix that.
+   Bump it whenever this file changes meaningfully. */
+const BUILD = '2026-09-09-e';
+
+/* ?debug=1 pins a small readout to the screen: the build, the session id,
+   and the result of every beacon as it goes out. It's the only way to see
+   whether the form is even trying to talk to the backend — sendBeacon
+   reports nothing and deliberately survives the tab closing, so a failure
+   is otherwise completely invisible from the outside. */
+const DEBUG = (function(){
+  try{ return new URLSearchParams(window.location.search).has('debug'); }
+  catch(e){ return false; }
+})();
+
 /* Reserved slugs that act as trackable REDIRECT shortlinks rather
    than form-entry tags. Add more here any time — no backend change
    needed. e.g. intent.picapool.tech/wa -> WhatsApp group. */
@@ -430,22 +447,48 @@ function detectDevice(){
 }
 const DEVICE = detectDevice();
 
+/* the ?debug=1 readout — inert unless that param is present */
+let debugBox = null;
+const debugLines = [];
+function debugLog(msg){
+  if(!DEBUG) return;
+  debugLines.push(new Date().toLocaleTimeString() + '  ' + msg);
+  while(debugLines.length > 14) debugLines.shift();
+  try{
+    if(!debugBox){
+      debugBox = document.createElement('div');
+      debugBox.setAttribute('style',
+        'position:fixed;left:0;right:0;bottom:0;z-index:99999;max-height:45vh;overflow:auto;' +
+        'background:#15130F;color:#8CE0B4;font:11px/1.45 ui-monospace,Menlo,monospace;' +
+        'padding:8px 10px;white-space:pre-wrap;word-break:break-all;border-top:2px solid #FF4B18');
+      document.body.appendChild(debugBox);
+    }
+    debugBox.textContent =
+      'build ' + BUILD + '\nsession ' + SESSION_ID + '\napi ' + API_BASE.slice(0, 62) + '…\n\n' +
+      debugLines.join('\n');
+  }catch(e){}
+}
+
 /* fire-and-forget POST, avoids CORS preflight against Apps Script.
    Prefers sendBeacon: unlike fetch(), it's guaranteed by the browser to
    still be attempted even if the tab closes/navigates right after this
    call — critical since a lot of taps happen right before someone leaves
    (closes the tab, or switches to WhatsApp). */
 function beacon(payload){
-  if(!API_BASE || API_BASE.indexOf('REPLACE_WITH') === 0){ return; }
+  if(!API_BASE || API_BASE.indexOf('REPLACE_WITH') === 0){ debugLog('no API_BASE set'); return; }
   const body = JSON.stringify(payload);
   try{
     if(navigator.sendBeacon){
       const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
       const ok = navigator.sendBeacon(API_BASE, blob);
+      debugLog((ok ? 'beacon ok  ' : 'beacon REFUSED ') + payload.action + ' ' + body.length + 'b');
       if(ok) return;
+    } else {
+      debugLog('no sendBeacon, using fetch');
     }
-  }catch(e){}
+  }catch(e){ debugLog('beacon threw: ' + e.message); }
   try{
+    debugLog('fetch fallback ' + payload.action);
     fetch(API_BASE, {
       method: 'POST',
       mode: 'no-cors',
@@ -613,7 +656,8 @@ function buildSubmissionPayload(status){
     referralCopiedAt: state.clicks.ref_copy || '',
     device: DEVICE,
     userAgent: navigator.userAgent || '',
-    eventsJSON: JSON.stringify(state.events.slice(-100))
+    eventsJSON: JSON.stringify(state.events.slice(-100)),
+    clientBuild: BUILD
   };
 }
 

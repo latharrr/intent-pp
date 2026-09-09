@@ -22,6 +22,15 @@
  * appended and the Dashboard gets rebuilt from the live formulas.
  */
 
+/* Bumped whenever this file changes meaningfully, and reported by doGet.
+   A Web App deployment serves a PINNED VERSION of the script: pasting new
+   code into the editor does not change what /exec runs until you publish a
+   new version (Deploy > Manage deployments > pencil > Version: New version).
+   Open the /exec URL and compare this string against the file you pasted —
+   if they differ, the live backend is not the code you are reading, and
+   nothing you change in the editor is having any effect. */
+const CODE_VERSION = '2026-09-09-e';
+
 const SUBMISSIONS_SHEET = 'Submissions';
 const SLUG_SHEET = 'Slug';
 const DASHBOARD_SHEET = 'Dashboard';
@@ -41,7 +50,10 @@ const SUBMISSION_HEADERS = [
   // readable brand detail — which exact brands they tapped, and anything
   // they hand-typed into an "Others" box. brandSelJSON above stays as the
   // lossless raw backup; these are what you actually read.
-  'brandsPicked', 'brandsTyped', 'brandCount', 'brandRowsJSON'
+  'brandsPicked', 'brandsTyped', 'brandCount', 'brandRowsJSON',
+  // which build of index.html produced this row — a row stamped with an old
+  // build (or blank) came from a form Vercel never redeployed
+  'clientBuild'
 ];
 // 1-based column indexes, kept in sync with SUBMISSION_HEADERS above
 const S_SESSION = 1, S_FIRSTSEEN = 2, S_LASTUPDATED = 3, S_STATUS = 4, S_SLUG = 5;
@@ -131,7 +143,10 @@ function logError(err, body) {
    Beats guessing when a row "doesn't show up". */
 function doGet(e) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const status = { ok: true, now: new Date() };
+  // codeVersion is the first thing to check: if it isn't the version in the
+  // file you pasted, /exec is serving an older deployment and your edits are
+  // not live. Deploy > Manage deployments > pencil > Version: New version.
+  const status = { ok: true, codeVersion: CODE_VERSION, now: new Date() };
   try {
     const sub = ss.getSheetByName(SUBMISSIONS_SHEET);
     status.submissions = sub ? Math.max(0, sub.getLastRow() - 1) : 0;
@@ -142,6 +157,7 @@ function doGet(e) {
       const n = sub.getLastRow() - 1;
       const rows = sub.getRange(2, 1, n, sub.getLastColumn()).getValues();
       let newest = null, withDetail = 0, rawOnly = 0;
+      const builds = {};
       rows.forEach(r => {
         const t = c.lastUpdated ? r[c.lastUpdated - 1] : null;
         if (t && (!newest || t > newest)) newest = t;
@@ -149,7 +165,12 @@ function doGet(e) {
         const raw = c.brandSelJSON ? r[c.brandSelJSON - 1] : '';
         if (detail && detail !== '[]') withDetail++;
         else if (raw && raw !== '{}') rawOnly++;
+        const b = c.clientBuild ? (r[c.clientBuild - 1] || '(none)') : '(no column)';
+        builds[b] = (builds[b] || 0) + 1;
       });
+      // which builds of index.html these rows came from; if the newest rows
+      // aren't stamped with the current BUILD, Vercel never redeployed
+      status.clientBuilds = builds;
       status.lastSubmissionAt = newest;
       // withBrandDetail 0 while rawOnly > 0 means the sheet is fine and the
       // backfill hasn't run; both 0 means nobody has picked a brand at all,
@@ -260,7 +281,7 @@ function handleSubmit(body) {
     epochToDate(body.appDownloadClickedAt), epochToDate(body.referralSharedAt),
     epochToDate(body.referralCopiedAt),
     body.brandsPicked || '', body.brandsTyped || '', body.brandCount || 0,
-    body.brandRowsJSON || ''
+    body.brandRowsJSON || '', body.clientBuild || '(pre-build-stamp)'
   ];
 
   const wasComplete = row > 0 && sh.getRange(row, S_STATUS).getValue() === 'complete';
@@ -562,8 +583,83 @@ function backfillBrandColumns() {
 /* =========================================================
    ONE-TIME SETUP
 ========================================================= */
+/* =========================================================
+   SELF TEST — pushes a synthetic submission through the real doPost and
+   reports what happened. Run it from the editor (or the PicaPool menu) to
+   settle the one question the Sheet alone can't answer: is the SCRIPT
+   broken, or is nothing reaching it?
+
+   It bypasses the web app entirely, so it tests the code you just pasted
+   rather than whatever version /exec is pinned to. If this writes a row
+   and your live form doesn't, the script is fine and the problem is the
+   deployment or the form — not this file.
+
+   Leaves a row with sessionId SELFTEST behind; delete it when done, or run
+   the menu item again, which overwrites the same row.
+========================================================= */
+function runSelfTest() {
+  const lines = [];
+  const say = m => { lines.push(m); console.log(m); };
+  say('code version: ' + CODE_VERSION);
+
+  const sub = getSheet(SUBMISSIONS_SHEET, SUBMISSION_HEADERS);
+  say('Submissions grid: ' + sub.getMaxRows() + ' rows x ' + sub.getMaxColumns() +
+      ' cols; headers ' + sub.getLastColumn() + ', schema expects ' + SUBMISSION_HEADERS.length);
+
+  const before = sub.getLastRow();
+  const payload = {
+    action: 'submit', sessionId: 'SELFTEST', status: 'complete',
+    slug: 'selftest', name: 'Self Test', phone: '0000000000',
+    categories: 'quickbites', otherCategoryText: '', categoriesFilled: 1,
+    categoriesTotal: 1, commitment: 'yes', currentScreen: 'final',
+    device: 'desktop', userAgent: 'self-test', clientBuild: 'self-test',
+    brandSelJSON: JSON.stringify({ quickbites: { picks: ['Lays'], other: 'Doritos', otherOn: true } }),
+    brandsPicked: 'Quick Bites & Munchies: Lays, Doritos (typed)',
+    brandsTyped: 'Quick Bites & Munchies: Doritos',
+    brandCount: 2,
+    brandRowsJSON: JSON.stringify([
+      ['Quick Bites & Munchies', '', 'Lays', 'preset'],
+      ['Quick Bites & Munchies', '', 'Doritos', 'typed']]),
+    eventsJSON: '[]'
+  };
+
+  let reply;
+  try {
+    reply = doPost({ postData: { contents: JSON.stringify(payload) } }).getContent();
+  } catch (err) {
+    reply = 'THREW: ' + (err && err.message ? err.message : err);
+  }
+  say('doPost said: ' + reply);
+  say('rows ' + before + ' -> ' + sub.getLastRow());
+
+  const c = colMap(sub);
+  const row = findRow(sub, S_SESSION, 'SELFTEST');
+  if (row > 0) {
+    say('SELFTEST row is at row ' + row +
+        '; brandsPicked = "' + sub.getRange(row, c.brandsPicked).getValue() + '"');
+  } else {
+    say('NO SELFTEST ROW WAS WRITTEN — the script itself is failing, see the Errors tab.');
+  }
+
+  const summary = rebuildBrands();
+  say('rebuildBrands: ' + JSON.stringify(summary));
+
+  const errs = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(ERROR_SHEET);
+  if (errs && errs.getLastRow() > 1) {
+    say('last error: ' + errs.getRange(errs.getLastRow(), 4).getValue());
+  } else {
+    say('no errors recorded');
+  }
+
+  const report = lines.join('\n');
+  try { SpreadsheetApp.getUi().alert('PicaPool self test', report, SpreadsheetApp.getUi().ButtonSet.OK); }
+  catch (e) { /* not run from the UI — the execution log has it */ }
+  return report;
+}
+
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('PicaPool')
+    .addItem('Run self test', 'runSelfTest')
     .addItem('Rebuild brand report', 'rebuildBrands')
     .addItem('Rebuild dashboard', 'buildDashboard')
     .addItem('Backfill old rows', 'backfillBrandColumns')
