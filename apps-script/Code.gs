@@ -29,7 +29,7 @@
    Open the /exec URL and compare this string against the file you pasted —
    if they differ, the live backend is not the code you are reading, and
    nothing you change in the editor is having any effect. */
-const CODE_VERSION = '2026-09-09-e';
+const CODE_VERSION = '2026-09-09-f';
 
 const SUBMISSIONS_SHEET = 'Submissions';
 const SLUG_SHEET = 'Slug';
@@ -181,6 +181,14 @@ function doGet(e) {
     }
     const brands = ss.getSheetByName(BRANDS_SHEET);
     status.brandRows = brands ? Math.max(0, brands.getLastRow() - 1) : 0;
+    // brandRows lagging withBrandDetail means the tab is merely stale, not
+    // that the data is missing — these say whether a refresh is even wired up
+    try {
+      const built = Number(PropertiesService.getScriptProperties().getProperty('brandsBuiltAt') || 0);
+      status.brandsBuiltAt = built ? new Date(built) : null;
+    } catch (e) { status.brandsBuiltAt = null; }
+    status.brandTriggerInstalled = ScriptApp.getProjectTriggers()
+      .some(t => t.getHandlerFunction() === 'rebuildBrands');
     const errs = ss.getSheetByName(ERROR_SHEET);
     status.errors = errs ? Math.max(0, errs.getLastRow() - 1) : 0;
     if (errs && errs.getLastRow() > 1) {
@@ -295,6 +303,30 @@ function handleSubmit(body) {
 
   if (body.status === 'complete' && !wasComplete) {
     bumpSlugCounter(body.slug, L_COMPLETIONS);
+  }
+
+  // Keep the derived Brands tab close to live. It used to refresh only on a
+  // 5-minute trigger that setupSheets alone installs, so on any sheet where
+  // setup hadn't been re-run the brands landed in Submissions and the Brands
+  // tab silently stayed at whatever it was last built with — the data was
+  // there, the view was stale, and the two are indistinguishable from the
+  // outside. Throttled so heavy traffic can't turn every completion into a
+  // full rebuild; the trigger stays as the backstop.
+  if (body.status === 'complete') maybeRebuildBrands();
+}
+
+const REBUILD_MIN_GAP_MS = 60 * 1000;
+
+function maybeRebuildBrands() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const last = Number(props.getProperty('brandsBuiltAt') || 0);
+    if (Date.now() - last < REBUILD_MIN_GAP_MS) return;
+    props.setProperty('brandsBuiltAt', String(Date.now()));
+    rebuildBrands();
+  } catch (err) {
+    // a stale Brands tab must never cost us the submission itself
+    console.error('maybeRebuildBrands failed', err);
   }
 }
 
@@ -663,6 +695,7 @@ function onOpen() {
     .addItem('Rebuild brand report', 'rebuildBrands')
     .addItem('Rebuild dashboard', 'buildDashboard')
     .addItem('Backfill old rows', 'backfillBrandColumns')
+    .addItem('Install 5-min brand refresh', 'installBrandTrigger')
     .addItem('Run full setup', 'setupSheets')
     .addToUi();
 }
@@ -670,8 +703,13 @@ function onOpen() {
 function installBrandTrigger() {
   const already = ScriptApp.getProjectTriggers()
     .some(t => t.getHandlerFunction() === 'rebuildBrands');
-  if (already) return;
+  if (already) {
+    try { SpreadsheetApp.getActiveSpreadsheet().toast('Brand refresh trigger is already installed.'); } catch (e) {}
+    return false;
+  }
   ScriptApp.newTrigger('rebuildBrands').timeBased().everyMinutes(5).create();
+  try { SpreadsheetApp.getActiveSpreadsheet().toast('Brand refresh trigger installed — Brands now updates every 5 minutes.'); } catch (e) {}
+  return true;
 }
 
 function setupSheets() {
