@@ -457,6 +457,76 @@ function logClick(type){
   flushProgress();
 }
 
+/* =========================================================
+   BRAND SELECTIONS → flat, readable rows
+
+   state.brandSel carries two shapes, depending on cat.kind:
+     flat    cat.id -> { picks:[], other:'', otherOn:bool }
+     nested  cat.id -> { group.id: { picks:[], other:'', otherOn:bool } }
+   Every consumer downstream (the Sheet's readable columns, the "filled"
+   counter, the Brands tab) goes through brandRows(), so those two shapes
+   are special-cased in exactly one place.
+
+   A brand typed into an "Others" box is a row like any other, flagged
+   source:'typed' — that's the only difference between a tapped chip and
+   a hand-written brand, and the Sheet keeps both distinguishable.
+========================================================= */
+function brandRows(){
+  const rows = [];
+  CATEGORY_META.forEach(cat => {
+    const sel = state.brandSel[cat.id];
+    if(!sel) return;
+    const collect = (group, sub) => {
+      if(!sub) return;
+      (sub.picks || []).forEach(b => rows.push({
+        catId: cat.id, cat: cat.label,
+        group: group ? group.label : '',
+        brand: b, typed: false
+      }));
+      const typed = (sub.other || '').trim();
+      if(typed) rows.push({
+        catId: cat.id, cat: cat.label,
+        group: group ? group.label : '',
+        brand: typed, typed: true
+      });
+    };
+    if(cat.kind === 'flat') collect(null, sel);
+    else (cat.groups || []).forEach(g => collect(g, sel[g.id]));
+  });
+  return rows;
+}
+
+/* "Supplements > Protein" / "Quick Bites & Munchies" */
+function brandRowLabel(r){ return r.group ? r.cat + ' > ' + r.group : r.cat; }
+
+/* one cell a human can read at a glance:
+   "Supplements > Protein: MuscleBlaze, NakPro | Skincare > Sunscreen: Foxtale" */
+function brandsPickedText(){
+  const byGroup = [];
+  const index = {};
+  brandRows().forEach(r => {
+    const k = brandRowLabel(r);
+    if(index[k] === undefined){ index[k] = byGroup.length; byGroup.push([k, []]); }
+    byGroup[index[k]][1].push(r.typed ? r.brand + ' (typed)' : r.brand);
+  });
+  return byGroup.map(e => e[0] + ': ' + e[1].join(', ')).join(' | ');
+}
+
+/* only what they hand-typed into an Others box, so it can be scanned for
+   brands worth adding as chips next round */
+function brandsTypedText(){
+  return brandRows().filter(r => r.typed)
+    .map(r => brandRowLabel(r) + ': ' + r.brand).join(' | ');
+}
+
+/* how many of the chosen categories they actually answered — counts a
+   nested category as filled if ANY of its groups has a pick or typed brand */
+function filledCategoryCount(){
+  const seen = {};
+  brandRows().forEach(r => { seen[r.catId] = true; });
+  return Object.keys(seen).length;
+}
+
 function saveLocal(){
   try{
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -482,11 +552,7 @@ function restoreLocal(){
 
 function buildSubmissionPayload(status){
   const catCount = state.order.filter(s => catMeta(s)).length;
-  const filled = Object.keys(state.brandSel).filter(k => {
-    const sel = state.brandSel[k];
-    if(Array.isArray(sel.picks)) return sel.picks.length > 0 || sel.other;
-    return sel.pick || sel.other;
-  }).length;
+  const rows = brandRows();
   return {
     action: 'submit',
     sessionId: SESSION_ID,
@@ -499,9 +565,17 @@ function buildSubmissionPayload(status){
     phone: state.phone,
     categories: state.categories.join(', '),
     otherCategoryText: state.otherCategoryText,
-    categoriesFilled: filled,
+    categoriesFilled: filledCategoryCount(),
     categoriesTotal: catCount,
     brandSelJSON: JSON.stringify(state.brandSel),
+    /* readable mirrors of brandSelJSON — the Sheet shows these, the raw
+       JSON stays as the lossless backup */
+    brandsPicked: brandsPickedText(),
+    brandsTyped: brandsTypedText(),
+    brandCount: rows.length,
+    /* already carries the category/group LABELS, so the Apps Script can
+       explode it into the Brands tab without duplicating CATEGORY_META */
+    brandRowsJSON: JSON.stringify(rows.map(r => [r.cat, r.group, r.brand, r.typed ? 'typed' : 'preset'])),
     commitment: state.commitment || '',
     currentScreen: currentId(),
     screensReached: state.pos,
@@ -1169,11 +1243,7 @@ function screenHTML(id){
   }
 
   if(id === 'final'){
-    const filled = Object.keys(state.brandSel).filter(k => {
-      const sel = state.brandSel[k];
-      if(Array.isArray(sel.picks)) return sel.picks.length > 0 || sel.other;
-      return sel.pick || sel.other;
-    }).length;
+    const filled = filledCategoryCount();
     const totalCategories = state.order.filter(s => catMeta(s)).length;
     const timeTaken = 180 - state.timeRemaining;
     const mins = Math.floor(timeTaken / 60);
@@ -1312,7 +1382,10 @@ function wireUp(id){
       });
     });
     const otherInp = document.getElementById('inpOtherCat');
-    if(otherInp){ otherInp.addEventListener('input', () => { state.otherCategoryText = otherInp.value; }); otherInp.focus(); }
+    /* typing doesn't re-render (that would steal focus), so sync explicitly —
+       otherwise a typed answer only reaches the Sheet if they tap something
+       else afterwards */
+    if(otherInp){ otherInp.addEventListener('input', () => { state.otherCategoryText = otherInp.value; syncProgress(); }); otherInp.focus(); }
     document.getElementById('btnCats').addEventListener('click', commitCategoriesAndAdvance);
     document.querySelector('[data-skip-cats]').addEventListener('click', skipCategories);
   }
@@ -1348,9 +1421,13 @@ function wireUp(id){
         });
       });
       const otherBtn = document.querySelector('[data-flat-other]');
-      otherBtn.addEventListener('click', () => { sel.otherOn = !sel.otherOn; render(); });
+      otherBtn.addEventListener('click', () => {
+        sel.otherOn = !sel.otherOn;
+        if(!sel.otherOn) sel.other = '';  // matches the nested branch — untoggling drops the typed brand
+        render();
+      });
       const otherInp = document.getElementById('inpFlatOther');
-      if(otherInp){ otherInp.addEventListener('input', () => { sel.other = otherInp.value; }); otherInp.focus(); }
+      if(otherInp){ otherInp.addEventListener('input', () => { sel.other = otherInp.value; syncProgress(); }); otherInp.focus(); }
     } else {
       if(!state.brandSel[cat.id]) state.brandSel[cat.id] = {};
       document.querySelectorAll('[data-group-head]').forEach(el => {
@@ -1387,6 +1464,7 @@ function wireUp(id){
         el.addEventListener('input', () => {
           const c = el.dataset.cat, g = el.dataset.group;
           state.brandSel[c][g].other = el.value;
+          syncProgress();
         });
       });
       // re-open the group the user last touched, keep focus for typing

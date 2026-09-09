@@ -8,14 +8,15 @@ bordered tables — not raw formula dumps).
 
 ## 1. Create the database (Google Sheet)
 
-1. Create a new blank Google Sheet — this **is** the database (3 tabs:
-   Dashboard, Submissions, Slug).
+1. Create a new blank Google Sheet — this **is** the database (4 tabs:
+   Dashboard, Submissions, Slug, Brands).
 2. Extensions → Apps Script. Delete the placeholder code, paste in the
    contents of [`apps-script/Code.gs`](apps-script/Code.gs).
 3. In the function dropdown at the top, select `setupSheets`, click ▶ Run.
    Approve the permissions Google asks for (it's your own script touching
-   your own sheet). This builds all 3 tabs, headers, red/green conditional
-   formatting on Submissions, and the full Dashboard.
+   your own sheet). This builds all 4 tabs, headers, red/green conditional
+   formatting on Submissions, the 5-minute trigger that keeps the Brands tab
+   fresh, and the full Dashboard.
 4. Deploy → New deployment → type **Web app**.
    - Execute as: **Me**
    - Who has access: **Anyone**
@@ -25,6 +26,25 @@ Already deployed once and just pulled a newer `Code.gs`? Paste the new file
 in over the old one and re-run `setupSheets()` — it's safe: existing rows are
 never touched, only missing columns get appended and the Dashboard rebuilds
 from the live formulas. You do **not** need a new deployment/URL for that.
+This particular update adds a `Brands` tab and a 5-minute time trigger, so
+Google will ask you to approve one extra permission (managing triggers) the
+first time you run it.
+
+**Rows you already collected are backfilled automatically.** The brand detail
+was always being written, just as an unreadable JSON blob in the
+`brandSelJSON` column — `setupSheets()` now runs `backfillBrandColumns()`,
+which walks that blob back through the category/group names and fills in
+`brandsPicked`, `brandsTyped`, `brandCount` and `brandRowsJSON` on every old
+row, producing exactly what the updated form would have sent at the time. It
+also corrects `categoriesFilled` on those rows, which the old client
+under-counted (it missed every nested category). Only rows with a blank
+`brandRowsJSON` are touched, so it's safe to re-run — from the menu it's
+**PicaPool → Backfill old rows**.
+
+One caveat: the backfill reads category and group *names* from
+`CATEGORY_LABELS` at the top of `Code.gs`, which mirrors `CATEGORY_META` in
+`index.html`. If you change categories or groups in the form and later need
+another backfill, mirror the change there first.
 
 ## 2. Point the form at it
 
@@ -96,12 +116,34 @@ left); every row also carries per-click timestamps (`waGroupClickedAt`,
 which links a specific named person tapped, plus a full JSON event trail
 (`eventsJSON`) of every screen they touched, in order.
 
+**Brand tracking** — every individual brand chip someone taps is recorded,
+and so is anything they hand-type into an "Others" box. Three places to read
+it, in increasing detail:
+
+1. **Dashboard → BRANDS** — "Top brands (by number of people)", plus two
+   tables for what people typed into the Others boxes (brands, and
+   categories) — that's the demand you don't have a chip for yet, so read it
+   before deciding what to add next round.
+2. **`Brands` tab** — one row per person per brand: session, name, phone,
+   status, category, sub-category, brand, and `source` = `preset` (tapped a
+   chip) or `typed` (wrote it in Others). Pivot/filter this however you want.
+3. **`Submissions` tab** — per person, the last four columns:
+   `brandsPicked` reads like `Supplements > Protein: MuscleBlaze, NakPro |
+   Skincare > Sunscreen: Foxtale`, `brandsTyped` is only what they typed,
+   `brandCount` is how many brands they named, and `brandRowsJSON` is the
+   machine-readable version the `Brands` tab is built from.
+
+The `Brands` tab is *derived* — it's rebuilt wholesale from Submissions
+every 5 minutes by a time trigger, and never edit it by hand. To refresh it
+immediately use **PicaPool → Rebuild brand report** in the Sheet's menu bar
+(that menu appears after a reload once `Code.gs` is in place).
+
 **Dashboard** — KPI tiles (sessions, completions, completion rate, referral
 signups), a text-bar funnel (visits → starts → completions), device and
-commitment breakdowns, an engagement-links table (clicks + unique users per
-link), and bordered/striped tables for top campaign links, top referrers,
-who-clicked-what, and recent completions. All formula-driven off Submissions
-+ Slug — nothing to maintain by hand.
+commitment breakdowns, the brand sections above, an engagement-links table
+(clicks + unique users per link), and bordered/striped tables for top
+campaign links, top referrers, who-clicked-what, and recent completions. All
+formula-driven off Submissions + Slug + Brands — nothing to maintain by hand.
 
 ## Known placeholder you still need to fill in
 

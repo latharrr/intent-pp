@@ -25,7 +25,11 @@
 const SUBMISSIONS_SHEET = 'Submissions';
 const SLUG_SHEET = 'Slug';
 const DASHBOARD_SHEET = 'Dashboard';
+const BRANDS_SHEET = 'Brands';
 
+// NEVER reorder or insert into this list — handleSubmit writes a row
+// positionally from column 1, and getSheet() only ever APPENDS newly-added
+// headers at the end. New fields go on the end, or old sheets shift.
 const SUBMISSION_HEADERS = [
   'sessionId', 'firstSeen', 'lastUpdated', 'status', 'slug', 'referredBy', 'myRefCode',
   'name', 'phone', 'categories', 'otherCategoryText', 'categoriesFilled', 'categoriesTotal',
@@ -33,7 +37,11 @@ const SUBMISSION_HEADERS = [
   'brandSelJSON', 'eventsJSON',
   // per-user click detail — who clicked what, and when (blank = never clicked)
   'waGroupClickedAt', 'buyingGroupClickedAt', 'appDownloadClickedAt',
-  'referralSharedAt', 'referralCopiedAt'
+  'referralSharedAt', 'referralCopiedAt',
+  // readable brand detail — which exact brands they tapped, and anything
+  // they hand-typed into an "Others" box. brandSelJSON above stays as the
+  // lossless raw backup; these are what you actually read.
+  'brandsPicked', 'brandsTyped', 'brandCount', 'brandRowsJSON'
 ];
 // 1-based column indexes, kept in sync with SUBMISSION_HEADERS above
 const S_SESSION = 1, S_FIRSTSEEN = 2, S_LASTUPDATED = 3, S_STATUS = 4, S_SLUG = 5;
@@ -44,6 +52,34 @@ const SLUG_HEADERS = [
 ];
 const L_SLUG = 1, L_TYPE = 2, L_DEST = 3, L_FIRSTSEEN = 4, L_LASTSEEN = 5,
       L_VISITS = 6, L_CLICKS = 7, L_STARTS = 8, L_COMPLETIONS = 9;
+
+/* Mirror of CATEGORY_META in index.html: id -> label, and for nested
+   categories the group ids -> labels, in the order the form renders them.
+
+   Live submissions don't need this — the form sends brandRowsJSON with the
+   labels already resolved. It exists purely for backfillBrandColumns(),
+   which has to rebuild that detail out of the raw brandSelJSON on rows
+   captured before the form started sending it, and brandSelJSON stores ids
+   only. If you add or rename a category/group in index.html and later need
+   another backfill, mirror the change here first. */
+const CATEGORY_LABELS = [
+  { id: 'quickbites', label: 'Quick Bites & Munchies', groups: null },
+  { id: 'zomato', label: 'Zomato / Swiggy', groups: null },
+  { id: 'supplements', label: 'Supplements', groups: [
+    ['protein', 'Protein'], ['creatine', 'Creatine'], ['oats', 'Oats'],
+    ['peanutbutter', 'Peanut Butter']] },
+  { id: 'skincare', label: 'Skincare', groups: [
+    ['facewash', 'Face Wash'], ['moisturizer', 'Moisturizer'],
+    ['sunscreen', 'Sunscreen'], ['serum', 'Face Serum']] },
+  { id: 'stationery', label: 'Stationery', groups: [
+    ['pencils', 'Pencils'], ['pens', 'Pens'], ['notebooks', 'Notebooks']] },
+  { id: 'haircare', label: 'Hair Care', groups: [
+    ['shampoo', 'Shampoo'], ['conditioner', 'Conditioner'],
+    ['hairserum', 'Hair Serum']] },
+  { id: 'drinks', label: 'Drinks', groups: [
+    ['coffeetea', 'Coffee/Tea'], ['sodas', 'Soda Drinks'],
+    ['cafes', 'Cafés / Tea Shops']] }
+];
 
 /* =========================================================
    ENTRY POINTS
@@ -134,7 +170,9 @@ function handleSubmit(body) {
     body.device || '', body.userAgent || '', body.brandSelJSON || '', body.eventsJSON || '',
     epochToDate(body.waGroupClickedAt), epochToDate(body.buyingGroupClickedAt),
     epochToDate(body.appDownloadClickedAt), epochToDate(body.referralSharedAt),
-    epochToDate(body.referralCopiedAt)
+    epochToDate(body.referralCopiedAt),
+    body.brandsPicked || '', body.brandsTyped || '', body.brandCount || 0,
+    body.brandRowsJSON || ''
   ];
 
   const wasComplete = row > 0 && sh.getRange(row, S_STATUS).getValue() === 'complete';
@@ -205,14 +243,215 @@ function handleCreateLink(body) {
 }
 
 /* =========================================================
+   BRANDS — one row per (person, brand). Submissions holds one row per
+   person with all their brands crammed into a couple of cells; that's
+   fine for reading a single respondent but useless for "which brands
+   are people actually asking for". This tab explodes brandRowsJSON into
+   a tidy long table, which the Dashboard then just QUERYs.
+
+   Rebuilt wholesale (it's derived data — Submissions is the source of
+   truth) on a 5-minute trigger and from the PicaPool menu.
+========================================================= */
+const BRAND_HEADERS = [
+  'sessionId', 'name', 'phone', 'status', 'lastUpdated',
+  'category', 'subCategory', 'brand', 'source'
+];
+
+/* header name -> 1-based column, so this keeps working no matter what
+   order getSheet() happened to append new columns in */
+function colMap(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol < 1) return {};
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const map = {};
+  headers.forEach((h, i) => { if (h) map[h] = i + 1; });
+  return map;
+}
+
+function rebuildBrands() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sub = ss.getSheetByName(SUBMISSIONS_SHEET);
+  const sh = getSheet(BRANDS_SHEET, BRAND_HEADERS);
+
+  // wipe everything below the header — this table is fully derived
+  if (sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(sh.getLastColumn(), BRAND_HEADERS.length)).clearContent();
+  }
+  if (!sub || sub.getLastRow() < 2) return;
+
+  const c = colMap(sub);
+  if (!c.brandRowsJSON) return; // sheet predates the brand columns
+  const values = sub.getRange(2, 1, sub.getLastRow() - 1, sub.getLastColumn()).getValues();
+
+  const out = [];
+  values.forEach(row => {
+    const raw = row[c.brandRowsJSON - 1];
+    if (!raw) return;
+    let picks;
+    try { picks = JSON.parse(raw); } catch (err) { return; }
+    if (!Array.isArray(picks)) return;
+    picks.forEach(p => {
+      // p is [category, subCategory, brand, 'preset'|'typed']
+      if (!p || !p[2]) return;
+      out.push([
+        row[c.sessionId - 1], row[c.name - 1], row[c.phone - 1],
+        row[c.status - 1], row[c.lastUpdated - 1],
+        p[0] || '', p[1] || '', p[2], p[3] || 'preset'
+      ]);
+    });
+  });
+
+  if (out.length) {
+    sh.getRange(2, 1, out.length, BRAND_HEADERS.length).setValues(out);
+  }
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, 1, BRAND_HEADERS.length)
+    .setBackground('#FFF4EB').setFontWeight('bold');
+}
+
+/* =========================================================
+   BACKFILL — reconstructs the readable brand columns for rows captured
+   before the form started sending them. Everything needed is already in
+   brandSelJSON (it was always being written, just as an unreadable blob
+   in one cell); this walks it through CATEGORY_LABELS to recover the
+   category/group names and produces byte-identical output to what the
+   form now sends live.
+
+   Safe to run more than once: it only touches rows whose brandRowsJSON is
+   still blank, so live data is never overwritten.
+========================================================= */
+
+/* the Apps Script twin of brandRows() in index.html — same iteration
+   order, same shape ([category, subCategory, brand, source]) */
+function brandRowsFromSel(sel) {
+  const rows = [];
+  CATEGORY_LABELS.forEach(cat => {
+    const s = sel[cat.id];
+    if (!s || typeof s !== 'object') return;
+    const collect = (groupLabel, sub) => {
+      if (!sub || typeof sub !== 'object') return;
+      const picks = sub.picks || [];
+      for (let i = 0; i < picks.length; i++) {
+        if (picks[i]) rows.push([cat.label, groupLabel, String(picks[i]), 'preset']);
+      }
+      const typed = String(sub.other || '').trim();
+      if (typed) rows.push([cat.label, groupLabel, typed, 'typed']);
+    };
+    if (!cat.groups) collect('', s);
+    else cat.groups.forEach(g => collect(g[1], s[g[0]]));
+  });
+  return rows;
+}
+
+function brandRowLabel(r) { return r[1] ? r[0] + ' > ' + r[1] : r[0]; }
+
+function brandsPickedFrom(rows) {
+  const order = [], byLabel = {};
+  rows.forEach(r => {
+    const k = brandRowLabel(r);
+    if (!byLabel[k]) { byLabel[k] = []; order.push(k); }
+    byLabel[k].push(r[3] === 'typed' ? r[2] + ' (typed)' : r[2]);
+  });
+  return order.map(k => k + ': ' + byLabel[k].join(', ')).join(' | ');
+}
+
+function brandsTypedFrom(rows) {
+  return rows.filter(r => r[3] === 'typed')
+    .map(r => brandRowLabel(r) + ': ' + r[2]).join(' | ');
+}
+
+function filledCategoriesFrom(rows) {
+  const seen = {};
+  rows.forEach(r => { seen[r[0]] = true; });
+  return Object.keys(seen).length;
+}
+
+function backfillBrandColumns() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sub = getSheet(SUBMISSIONS_SHEET, SUBMISSION_HEADERS); // ensures the 4 new columns exist
+  if (sub.getLastRow() < 2) return 0;
+
+  const c = colMap(sub);
+  const n = sub.getLastRow() - 1;
+  const values = sub.getRange(2, 1, n, sub.getLastColumn()).getValues();
+
+  // one column-shaped array per column we touch, written back in a single
+  // setValues each — a per-row write would be thousands of API calls
+  const picked = [], typed = [], counts = [], json = [], filled = [];
+  let changed = 0;
+
+  values.forEach(row => {
+    const existing = row[c.brandRowsJSON - 1];
+    const raw = row[c.brandSelJSON - 1];
+    // already has live brand detail, or never had anything to recover
+    if (existing || !raw) {
+      picked.push([row[c.brandsPicked - 1]]);
+      typed.push([row[c.brandsTyped - 1]]);
+      counts.push([row[c.brandCount - 1]]);
+      json.push([existing]);
+      filled.push([row[c.categoriesFilled - 1]]);
+      return;
+    }
+    let sel;
+    try { sel = JSON.parse(raw); } catch (err) { sel = null; }
+    if (!sel || typeof sel !== 'object') {
+      picked.push([row[c.brandsPicked - 1]]);
+      typed.push([row[c.brandsTyped - 1]]);
+      counts.push([row[c.brandCount - 1]]);
+      json.push(['']);
+      filled.push([row[c.categoriesFilled - 1]]);
+      return;
+    }
+    const rows = brandRowsFromSel(sel);
+    picked.push([brandsPickedFrom(rows)]);
+    typed.push([brandsTypedFrom(rows)]);
+    counts.push([rows.length]);
+    json.push([JSON.stringify(rows)]);
+    // these rows were written by the old client, which under-counted every
+    // nested category — recompute it from the same source while we're here
+    filled.push([filledCategoriesFrom(rows)]);
+    changed++;
+  });
+
+  sub.getRange(2, c.brandsPicked, n, 1).setValues(picked);
+  sub.getRange(2, c.brandsTyped, n, 1).setValues(typed);
+  sub.getRange(2, c.brandCount, n, 1).setValues(counts);
+  sub.getRange(2, c.brandRowsJSON, n, 1).setValues(json);
+  sub.getRange(2, c.categoriesFilled, n, 1).setValues(filled);
+
+  ss.toast('Backfilled brand detail on ' + changed + ' row(s).');
+  return changed;
+}
+
+/* =========================================================
    ONE-TIME SETUP
 ========================================================= */
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('PicaPool')
+    .addItem('Rebuild brand report', 'rebuildBrands')
+    .addItem('Rebuild dashboard', 'buildDashboard')
+    .addItem('Backfill old rows', 'backfillBrandColumns')
+    .addItem('Run full setup', 'setupSheets')
+    .addToUi();
+}
+
+function installBrandTrigger() {
+  const already = ScriptApp.getProjectTriggers()
+    .some(t => t.getHandlerFunction() === 'rebuildBrands');
+  if (already) return;
+  ScriptApp.newTrigger('rebuildBrands').timeBased().everyMinutes(5).create();
+}
+
 function setupSheets() {
   getSheet(SUBMISSIONS_SHEET, SUBMISSION_HEADERS);
   getSheet(SLUG_SHEET, SLUG_HEADERS);
+  getSheet(BRANDS_SHEET, BRAND_HEADERS);
   applyConditionalFormatting();
+  backfillBrandColumns(); // recover brand detail on rows written before this update
+  rebuildBrands();
+  installBrandTrigger();
   buildDashboard();
-  SpreadsheetApp.getActiveSpreadsheet().toast('Setup complete: Dashboard, Submissions, Slug are ready.');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Setup complete: Dashboard, Submissions, Slug, Brands are ready.');
 }
 
 function applyConditionalFormatting() {
@@ -351,6 +590,63 @@ function buildDashboard() {
   barRow('Count me in', 'COUNTIF(Submissions!N2:N2000,"yes")', 'COUNTIF(Submissions!N2:N2000,"<>")', TEAL);
   barRow('Depends on price', 'COUNTIF(Submissions!N2:N2000,"depends")', 'COUNTIF(Submissions!N2:N2000,"<>")', GOLD);
   barRow('Just curious', 'COUNTIF(Submissions!N2:N2000,"curious")', 'COUNTIF(Submissions!N2:N2000,"<>")', FAINT);
+  blank();
+
+  // ---- brands ----
+  // Everything here reads the Brands tab (one row per person per brand),
+  // which rebuildBrands() derives from Submissions every 5 minutes.
+  section('BRANDS — WHAT PEOPLE ACTUALLY NAMED');
+  put('Distinct brands named', '=IFERROR(COUNTA(UNIQUE(FILTER(Brands!H2:H,Brands!H2:H<>""))),0)', ORANGE);
+  put('Total brand picks', '=COUNTA(Brands!H2:H)', INK);
+  put('Hand-typed ("Others") picks', '=COUNTIF(Brands!I2:I,"typed")', VIOLET);
+  blank();
+
+  // a QUERY with `group by` always emits a label row ("count") ahead of its
+  // results, which the plain selects elsewhere on this sheet don't. Wrapping
+  // it in an outer `select * offset 1` drops that row so the results line up
+  // under the header we drew ourselves.
+  const grouped = (range, select, fallback) =>
+    '=IFERROR(QUERY(QUERY(' + range + ',"' + select + '", 0), "select * offset 1", 0), "' + fallback + '")';
+
+  section('TOP BRANDS (by number of people)');
+  tableHeader(['Brand', 'Category', 'Sub-category', 'People']);
+  tableBody(
+    grouped('Brands!A2:I20000',
+      'select H, F, G, count(A) where H is not null group by H, F, G order by count(A) desc limit 25',
+      'No brand picks yet'),
+    25, 4
+  );
+  blank();
+
+  // the demand signal that isn't on any chip yet — read this before the
+  // next round to decide which brands to promote into the options list
+  section('TYPED INTO THE "OTHERS" BOX — BRANDS');
+  tableHeader(['Brand typed', 'Category', 'Sub-category', 'People']);
+  tableBody(
+    grouped('Brands!A2:I20000',
+      'select H, F, G, count(A) where I = \'typed\' group by H, F, G order by count(A) desc limit 25',
+      'Nobody has typed a brand yet'),
+    25, 4
+  );
+  blank();
+
+  section('TYPED INTO THE "OTHERS" BOX — CATEGORIES');
+  tableHeader(['Category typed', 'People']);
+  tableBody(
+    grouped('Submissions!A2:AD20000',
+      'select K, count(A) where K <> \'\' group by K order by count(A) desc limit 15',
+      'Nobody has typed a category yet'),
+    15, 2
+  );
+  blank();
+
+  section('BRANDS PER PERSON (most recent)');
+  tableHeader(['Name', 'Phone', 'Status', '# brands', 'Brands they picked', 'Typed in "Others"']);
+  tableBody(
+    '=IFERROR(QUERY(Submissions!A2:AD20000,' +
+    '"select H, I, D, AC, AA, AB where H <> \'\' order by C desc limit 25", 0), "No submissions yet")',
+    25, 6
+  );
   blank();
 
   // ---- engagement links table ----
