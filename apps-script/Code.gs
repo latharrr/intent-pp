@@ -140,10 +140,23 @@ function doGet(e) {
     if (sub && sub.getLastRow() > 1) {
       const c = colMap(sub);
       const n = sub.getLastRow() - 1;
-      const stamps = sub.getRange(2, c.lastUpdated, n, 1).getValues();
-      let newest = null;
-      stamps.forEach(s => { if (s[0] && (!newest || s[0] > newest)) newest = s[0]; });
+      const rows = sub.getRange(2, 1, n, sub.getLastColumn()).getValues();
+      let newest = null, withDetail = 0, rawOnly = 0;
+      rows.forEach(r => {
+        const t = c.lastUpdated ? r[c.lastUpdated - 1] : null;
+        if (t && (!newest || t > newest)) newest = t;
+        const detail = c.brandRowsJSON ? r[c.brandRowsJSON - 1] : '';
+        const raw = c.brandSelJSON ? r[c.brandSelJSON - 1] : '';
+        if (detail && detail !== '[]') withDetail++;
+        else if (raw && raw !== '{}') rawOnly++;
+      });
       status.lastSubmissionAt = newest;
+      // withBrandDetail 0 while rawOnly > 0 means the sheet is fine and the
+      // backfill hasn't run; both 0 means nobody has picked a brand at all,
+      // which on a live form means index.html was never redeployed
+      status.withBrandDetail = withDetail;
+      status.rawBlobOnly = rawOnly;
+      status.hasBrandColumns = !!c.brandRowsJSON;
     }
     const brands = ss.getSheetByName(BRANDS_SHEET);
     status.brandRows = brands ? Math.max(0, brands.getLastRow() - 1) : 0;
@@ -346,27 +359,53 @@ function colMap(sheet) {
 }
 
 function rebuildBrands() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sub = ss.getSheetByName(SUBMISSIONS_SHEET);
+  // getSheet, NOT getSheetByName: if the brand columns were never added —
+  // script pasted but setupSheets never finished, say — this adds them and
+  // carries on, instead of the old behaviour of returning silently and
+  // leaving an empty tab with nothing to explain why.
+  const sub = getSheet(SUBMISSIONS_SHEET, SUBMISSION_HEADERS);
   const sh = getSheet(BRANDS_SHEET, BRAND_HEADERS);
 
   // wipe everything below the header — this table is fully derived
   if (sh.getLastRow() > 1) {
     sh.getRange(2, 1, sh.getLastRow() - 1, Math.max(sh.getLastColumn(), BRAND_HEADERS.length)).clearContent();
   }
-  if (!sub || sub.getLastRow() < 2) return;
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, 1, BRAND_HEADERS.length)
+    .setBackground('#FFF4EB').setFontWeight('bold');
 
-  const c = colMap(sub);
-  if (!c.brandRowsJSON) return; // sheet predates the brand columns
-  const values = sub.getRange(2, 1, sub.getLastRow() - 1, sub.getLastColumn()).getValues();
+  const summary = { people: 0, withBrandDetail: 0, rawOnly: 0, brandRows: 0, note: '' };
+  if (sub.getLastRow() < 2) {
+    summary.note = 'No submissions yet — nothing to build from.';
+    return brandsToast(summary);
+  }
+
+  let c = colMap(sub);
+  let values = sub.getRange(2, 1, sub.getLastRow() - 1, sub.getLastColumn()).getValues();
+  summary.people = values.length;
+
+  // Rows written before the form started sending labelled brand detail hold
+  // only the raw brandSelJSON blob. Recover them here rather than producing
+  // an empty tab: this is the single most common reason Brands looks stuck.
+  const needsBackfill = values.some(
+    row => !row[c.brandRowsJSON - 1] && row[c.brandSelJSON - 1]);
+  if (needsBackfill) {
+    backfillBrandColumns();
+    c = colMap(sub);
+    values = sub.getRange(2, 1, sub.getLastRow() - 1, sub.getLastColumn()).getValues();
+  }
 
   const out = [];
   values.forEach(row => {
     const raw = row[c.brandRowsJSON - 1];
-    if (!raw) return;
+    if (!raw) {
+      if (row[c.brandSelJSON - 1]) summary.rawOnly++;
+      return;
+    }
     let picks;
     try { picks = JSON.parse(raw); } catch (err) { return; }
     if (!Array.isArray(picks)) return;
+    if (picks.length) summary.withBrandDetail++;
     picks.forEach(p => {
       // p is [category, subCategory, brand, 'preset'|'typed']
       if (!p || !p[2]) return;
@@ -384,9 +423,26 @@ function rebuildBrands() {
     ensureGrid(sh, out.length + 1, BRAND_HEADERS.length);
     sh.getRange(2, 1, out.length, BRAND_HEADERS.length).setValues(out);
   }
-  sh.setFrozenRows(1);
-  sh.getRange(1, 1, 1, BRAND_HEADERS.length)
-    .setBackground('#FFF4EB').setFontWeight('bold');
+  summary.brandRows = out.length;
+
+  if (!out.length) {
+    summary.note = summary.rawOnly
+      ? summary.rawOnly + ' row(s) still hold only the raw brandSelJSON and could not be ' +
+        'decoded — check that CATEGORY_LABELS matches CATEGORY_META in index.html.'
+      : 'No submission has any brand picked yet. If people ARE picking brands on the ' +
+        'live form, index.html has not been redeployed — the old build never sends them.';
+  }
+  return brandsToast(summary);
+}
+
+/* say what happened — a rebuild that produces nothing should explain
+   itself rather than look like it didn't run */
+function brandsToast(summary) {
+  const msg = summary.brandRows + ' brand rows from ' + summary.withBrandDetail +
+    '/' + summary.people + ' submissions. ' + (summary.note || '');
+  console.log('rebuildBrands: ' + JSON.stringify(summary));
+  try { SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'Brands rebuilt', 15); } catch (e) {}
+  return summary;
 }
 
 /* =========================================================
