@@ -93,14 +93,72 @@ function doPost(e) {
     if (body.action === 'submit') handleSubmit(body);
     else if (body.action === 'track') handleTrack(body);
     else if (body.action === 'createLink') handleCreateLink(body);
+  } catch (err) {
+    // The form posts with sendBeacon, which throws the response away — an
+    // uncaught error here is a write that vanishes with nothing to see on
+    // either side. Record it so a failure is something you can look at.
+    logError(err, body);
+    return textOut('error: ' + (err && err.message ? err.message : err));
   } finally {
     lock.releaseLock();
   }
   return textOut('ok');
 }
 
+const ERROR_SHEET = 'Errors';
+const ERROR_HEADERS = ['at', 'action', 'sessionId', 'message', 'payload'];
+
+function logError(err, body) {
+  try {
+    const sh = getSheet(ERROR_SHEET, ERROR_HEADERS);
+    ensureGrid(sh, sh.getLastRow() + 1, ERROR_HEADERS.length);
+    sh.appendRow([
+      new Date(),
+      (body && body.action) || '',
+      (body && body.sessionId) || '',
+      String((err && err.message) || err).slice(0, 500),
+      JSON.stringify(body || {}).slice(0, 2000)
+    ]);
+  } catch (ignored) {
+    // the error sheet itself is broken — the Apps Script execution log is
+    // the last resort, don't mask the original failure by throwing here
+    console.error('logError failed', ignored, err);
+  }
+}
+
+/* Open the /exec URL in a browser to see whether the backend is actually
+   receiving anything — counts, the newest submission, and the last error.
+   Beats guessing when a row "doesn't show up". */
 function doGet(e) {
-  return textOut('Picapool intent backend is live.');
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const status = { ok: true, now: new Date() };
+  try {
+    const sub = ss.getSheetByName(SUBMISSIONS_SHEET);
+    status.submissions = sub ? Math.max(0, sub.getLastRow() - 1) : 0;
+    status.columns = sub ? sub.getLastColumn() : 0;
+    status.expectedColumns = SUBMISSION_HEADERS.length;
+    if (sub && sub.getLastRow() > 1) {
+      const c = colMap(sub);
+      const n = sub.getLastRow() - 1;
+      const stamps = sub.getRange(2, c.lastUpdated, n, 1).getValues();
+      let newest = null;
+      stamps.forEach(s => { if (s[0] && (!newest || s[0] > newest)) newest = s[0]; });
+      status.lastSubmissionAt = newest;
+    }
+    const brands = ss.getSheetByName(BRANDS_SHEET);
+    status.brandRows = brands ? Math.max(0, brands.getLastRow() - 1) : 0;
+    const errs = ss.getSheetByName(ERROR_SHEET);
+    status.errors = errs ? Math.max(0, errs.getLastRow() - 1) : 0;
+    if (errs && errs.getLastRow() > 1) {
+      const last = errs.getRange(errs.getLastRow(), 1, 1, 4).getValues()[0];
+      status.lastError = { at: last[0], action: last[1], message: last[3] };
+    }
+  } catch (err) {
+    status.ok = false;
+    status.message = String((err && err.message) || err);
+  }
+  return ContentService.createTextOutput(JSON.stringify(status, null, 2))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function textOut(msg) {
@@ -114,11 +172,26 @@ function epochToDate(ms) {
 /* =========================================================
    SHEET HELPERS
 ========================================================= */
+/* A Google Sheet tab is created 1000 rows x 26 columns and does NOT grow
+   on its own: getRange() past those bounds throws, it doesn't widen the
+   grid. The original 26-column schema fit that default exactly, so this
+   never came up — the moment the schema passed 26 columns, every single
+   getSheet() call started throwing, and since doPost had no catch, every
+   write failed silently behind a discarded 500. Same trap on rows once
+   the Brands tab passes 1000. Call this before any range that could sit
+   outside what the sheet currently has. */
+function ensureGrid(sheet, minRows, minCols) {
+  const rows = sheet.getMaxRows(), cols = sheet.getMaxColumns();
+  if (minCols > cols) sheet.insertColumnsAfter(cols, minCols - cols);
+  if (minRows > rows) sheet.insertRowsAfter(rows, minRows - rows);
+}
+
 function getSheet(name, headers) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
+    ensureGrid(sh, 2, headers.length);
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
     sh.setFrozenRows(1);
     return sh;
@@ -126,6 +199,7 @@ function getSheet(name, headers) {
   const lastCol = sh.getLastColumn();
   const existing = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0] : [];
   if (!existing[0]) {
+    ensureGrid(sh, 2, headers.length);
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
     sh.setFrozenRows(1);
     return sh;
@@ -134,6 +208,7 @@ function getSheet(name, headers) {
   // missing, at the end, never touching existing columns or data.
   const missing = headers.filter(h => existing.indexOf(h) === -1);
   if (missing.length) {
+    ensureGrid(sh, 2, existing.length + missing.length);
     sh.getRange(1, existing.length + 1, 1, missing.length).setValues([missing]);
   }
   return sh;
@@ -177,8 +252,10 @@ function handleSubmit(body) {
 
   const wasComplete = row > 0 && sh.getRange(row, S_STATUS).getValue() === 'complete';
   if (row > 0) {
+    ensureGrid(sh, row, rowData.length);
     sh.getRange(row, 1, 1, rowData.length).setValues([rowData]);
   } else {
+    ensureGrid(sh, sh.getLastRow() + 1, rowData.length);
     sh.appendRow(rowData);
   }
 
@@ -302,6 +379,9 @@ function rebuildBrands() {
   });
 
   if (out.length) {
+    // one row per person per brand — this passes the default 1000-row grid
+    // far sooner than Submissions does
+    ensureGrid(sh, out.length + 1, BRAND_HEADERS.length);
     sh.getRange(2, 1, out.length, BRAND_HEADERS.length).setValues(out);
   }
   sh.setFrozenRows(1);
@@ -456,6 +536,7 @@ function setupSheets() {
 
 function applyConditionalFormatting() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SUBMISSIONS_SHEET);
+  ensureGrid(sh, 2001, SUBMISSION_HEADERS.length);
   const range = sh.getRange(2, 1, 2000, SUBMISSION_HEADERS.length);
   const partial = SpreadsheetApp.newConditionalFormatRule()
     .whenFormulaSatisfied('=$D2="partial"')

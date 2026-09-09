@@ -364,15 +364,41 @@ const state = {
 const STORAGE_KEY = 'picapool_intent_state_v1';
 const SESSION_KEY = 'picapool_intent_session_v1';
 
+function newSessionId(){
+  return 's_' + Date.now().toString(36) + Math.random().toString(36).slice(2,10);
+}
+
+/* The session id lives in localStorage and deliberately never rotates —
+   that's what makes "come back tomorrow and resume on the same screen"
+   work, and it's why the backend UPSERTS on sessionId rather than
+   appending. The flip side: filling the form again in the same browser
+   rewrites your existing row, it does not create a second one.
+
+   ?new=1 (or ?fresh=1) wipes the stored session and progress and starts
+   over as a brand-new respondent — for testing, and for a shared/demo
+   device where the next person must not inherit the last one's answers. */
+function isFreshRequest(){
+  try{
+    const q = new URLSearchParams(window.location.search);
+    return q.has('new') || q.has('fresh');
+  }catch(e){ return false; }
+}
+
 function getSessionId(){
   try{
+    if(isFreshRequest()){
+      localStorage.removeItem(STORAGE_KEY);
+      const fresh = newSessionId();
+      localStorage.setItem(SESSION_KEY, fresh);
+      return fresh;
+    }
     let id = localStorage.getItem(SESSION_KEY);
     if(!id){
-      id = 's_' + Date.now().toString(36) + Math.random().toString(36).slice(2,10);
+      id = newSessionId();
       localStorage.setItem(SESSION_KEY, id);
     }
     return id;
-  }catch(e){ return 's_' + Date.now().toString(36); }
+  }catch(e){ return newSessionId(); }
 }
 const SESSION_ID = getSessionId();
 

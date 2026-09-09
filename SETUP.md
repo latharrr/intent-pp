@@ -145,6 +145,28 @@ commitment breakdowns, the brand sections above, an engagement-links table
 campaign links, top referrers, who-clicked-what, and recent completions. All
 formula-driven off Submissions + Slug + Brands — nothing to maintain by hand.
 
+## "I filled the form again and no new row appeared"
+
+That's the design, not a fault. The session id lives in `localStorage` and
+never rotates — it's what makes "close the tab, come back tomorrow, resume
+on the same screen" work — and the backend **upserts on `sessionId`**. Filling
+the form again in the same browser **rewrites your existing row**; it never
+adds a second one. Sort by `lastUpdated` and you'll find it.
+
+To submit as a genuinely new respondent, open
+`intent.picapool.tech/?new=1` (`?fresh=1` works too). That clears the stored
+session and saved progress and starts over. Use it when testing, or on a
+shared/demo phone so the next person doesn't inherit the last one's answers.
+A private window or a different browser does the same thing.
+
+If rows really are missing, open the `/exec` URL directly in a browser. It
+now returns a status JSON — submission count, current vs expected column
+count, the newest `lastUpdated`, brand-row count, and the last error — so you
+can tell in one look whether the backend is receiving anything. Any write
+that throws is also appended to an `Errors` tab with its payload, instead of
+disappearing (the form posts with `sendBeacon`, which discards the response,
+so a failed write used to be completely invisible on both sides).
+
 ## Known placeholder you still need to fill in
 
 - `BUYING_GROUP_LINK` in `index.html` — no link was provided for this yet.
